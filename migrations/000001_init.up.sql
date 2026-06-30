@@ -17,7 +17,7 @@ CREATE TABLE todoapp.tasks (
     created_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
     CHECK (
-        (completed=FALSE AND ompleted_at IS NULL)
+        (completed=FALSE AND completed_at IS NULL)
         OR
         (completed= TRUE AND completed_at IS NOT NULL AND completed_at >= created_at)
         ),

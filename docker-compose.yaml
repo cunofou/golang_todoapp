@@ -9,6 +9,7 @@ services:
     volumes:
       - ./out/pgdata:/var/lib/postgresql
     restart: always
+
   todoapp-postgres-migrate:
     image: migrate/migrate:v4.19.1
     volumes:
@@ -16,3 +17,13 @@ services:
     command: ["-path", "/migrations", "-database", "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@todoapp-postgres:5432/${POSTGRES_DB}?sslmode=disable", "up"]
     depends_on:
       - todoapp-postgres
+
+  todoapp-postgres-port-forwarder:
+    image: alpine/socat:latest
+    container_name: todoapp-postgres-port-forwarder
+    command: TCP-LISTEN:5432,fork,reuseaddr TCP-CONNECT:todoapp-postgres:5432
+    ports:
+      - "127.0.0.1:5432:5432"
+    depends_on:
+      - todoapp-postgres
+    restart: always
