@@ -8,3 +8,18 @@ CREATE TABLE todoapp.users (
 
 );
 
+CREATE TABLE todoapp.tasks (
+    id SERIAL PRIMARY KEY,
+    version BIGINT NOT NULL DEFAULT 1,
+    title VARCHAR(100) NOT NULL CHECK ( CHAR_LENGTH(title) BETWEEN 1 AND 100),
+    description VARCHAR(1000) CHECK ( CHAR_LENGTH(description) BETWEEN 1 AND 1000),
+    completed BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+    CHECK (
+        (completed=FALSE AND ompleted_at IS NULL)
+        OR
+        (completed= TRUE AND completed_at IS NOT NULL AND completed_at >= created_at)
+        ),
+    author_user_id INTEGER NOT NULL REFERENCES todoapp.users(id)
+)
