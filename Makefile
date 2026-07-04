@@ -29,6 +29,5 @@ env-port-close:
 	docker compose down port-forwarder
 test-target:
 	@echo "value: $(var)"
-
 todoapp-run:
-	go run cmd/todoapp/main.go
+	set LOGGER_FOLDER=out\logs&& go mod tidy && go run cmd/todoapp/main.go tidy && go run cmd/todoapp/main.go
