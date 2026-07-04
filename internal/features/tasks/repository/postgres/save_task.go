@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_errors "github.com/cunofou/golang-todoapp/internal/core/errors"
-	core_postgres_pool "github.com/cunofou/golang-todoapp/internal/core/repository/postgres/pool"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
 )
 
 // SaveTask вставляет новую задачу в БД и возвращает сохранённую версию (с данными из БД).

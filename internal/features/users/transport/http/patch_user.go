@@ -5,11 +5,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_logger "github.com/cunofou/golang-todoapp/internal/core/logger"
-	core_http_request "github.com/cunofou/golang-todoapp/internal/core/transport/http/request"
-	core_http_response "github.com/cunofou/golang-todoapp/internal/core/transport/http/response"
-	core_http_types "github.com/cunofou/golang-todoapp/internal/core/transport/http/types"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	core_http_types "github.com/cunofou/golang_todoapp/internal/core/transport/http/types"
 )
 
 type PatchUserRequest struct {

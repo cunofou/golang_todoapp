@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_logger "github.com/cunofou/golang-todoapp/internal/core/logger"
-	core_http_request "github.com/cunofou/golang-todoapp/internal/core/transport/http/request"
-	core_http_response "github.com/cunofou/golang-todoapp/internal/core/transport/http/response"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
 	"github.com/google/uuid"
 )
 

@@ -3,8 +3,8 @@ package tasks_postgres_repository
 import (
 	"time"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_postgres_pool "github.com/cunofou/golang-todoapp/internal/core/repository/postgres/pool"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
 	"github.com/google/uuid"
 )
 

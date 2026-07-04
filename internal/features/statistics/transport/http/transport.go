@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_http_server "github.com/cunofou/golang-todoapp/internal/core/transport/http/server"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_http_server "github.com/cunofou/golang_todoapp/internal/core/transport/http/server"
 	"github.com/google/uuid"
 )
 

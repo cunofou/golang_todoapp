@@ -1,8 +1,8 @@
 package users_postgres_repository
 
 import (
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_postgres_pool "github.com/cunofou/golang-todoapp/internal/core/repository/postgres/pool"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
 	"github.com/google/uuid"
 )
 

@@ -1,79 +1,53 @@
-package core_http_request
+package request
 
 import (
-	"fmt"
-	"net/http"
-	"strconv"
-	"time"
+    "fmt"
+    "net/http"
+    "strconv"
+    "time"
 
-	core_errors "github.com/cunofou/golang-todoapp/internal/core/errors"
-	"github.com/google/uuid"
+    core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+    "github.com/google/uuid"
 )
 
-// GetUUIDQueryParam читает query-параметр key и парсит его как UUID.
-// Возвращает nil (без ошибки) если параметр отсутствует — это означает «фильтр не задан».
-func GetUUIDQueryParam(r *http.Request, key string) (*uuid.UUID, error) {
-	param := r.URL.Query().Get(key)
-	if param == "" {
-		return nil, nil
-	}
+func GetUUIDQueryParam(r *http.Request, key string) (uuid.UUID, error) {
+    value := r.URL.Query().Get(key)
+    if value == "" {
+        return uuid.Nil, nil
+    }
 
-	val, err := uuid.Parse(param)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"param='%s' by key='%s' not a valid uuid: %v: %w",
-			param,
-			key,
-			err,
-			core_errors.ErrInvalidArgument,
-		)
-	}
+    id, err := uuid.Parse(value)
+    if err != nil {
+        return uuid.Nil, fmt.Errorf("invalid UUID format for query param %s: %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	return &val, nil
+    return id, nil
 }
 
-// GetIntQueryParam читает query-параметр key и парсит его как int.
-// Возвращает nil если параметр отсутствует (пагинация не задана).
-func GetIntQueryParam(r *http.Request, key string) (*int, error) {
-	param := r.URL.Query().Get(key)
-	if param == "" {
-		return nil, nil
-	}
+func GetIntQueryParam(r *http.Request, key string) (int, error) {
+    value := r.URL.Query().Get(key)
+    if value == "" {
+        return 0, nil
+    }
 
-	val, err := strconv.Atoi(param)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"param='%s' by key='%s' not a valid integer: %v: %w",
-			param,
-			key,
-			err,
-			core_errors.ErrInvalidArgument,
-		)
-	}
+    num, err := strconv.Atoi(value)
+    if err != nil {
+        return 0, fmt.Errorf("invalid integer format for query param %s: %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	return &val, nil
+    return num, nil
 }
 
-// GetDateQueryParam читает query-параметр key и парсит его как дату формата YYYY-MM-DD.
-// Возвращает nil если параметр отсутствует (фильтр по дате не задан).
-func GetDateQueryParam(r *http.Request, key string) (*time.Time, error) {
-	param := r.URL.Query().Get(key)
-	if param == "" {
-		return nil, nil
-	}
+func GetDateQueryParam(r *http.Request, key string) (time.Time, error) {
+    value := r.URL.Query().Get(key)
+    if value == "" {
+        return time.Time{}, nil
+    }
 
-	layout := "2006-01-02"
+    t, err := time.Parse(time.RFC3339, value)
+    if err != nil {
+        return time.Time{}, fmt.Errorf("invalid date format for query param %s (expected RFC3339): %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	date, err := time.Parse(layout, param)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"param='%s' by key='%s' not a valid date: %v: %w",
-			param,
-			key,
-			err,
-			core_errors.ErrInvalidArgument,
-		)
-	}
-
-	return &date, nil
+    return t, nil
 }

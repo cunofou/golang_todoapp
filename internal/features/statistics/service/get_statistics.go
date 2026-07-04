@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_errors "github.com/cunofou/golang-todoapp/internal/core/errors"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
 	"github.com/google/uuid"
 )
 

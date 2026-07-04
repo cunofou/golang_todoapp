@@ -8,14 +8,14 @@ import (
 	"github.com/google/uuid"
 )
 
-package statistics_postgres_repository
+package postgres
 
 import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_postgres_pool "github.com/cunofou/golang-todoapp/internal/core/repository/postgres/pool"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
 )
 
 // TaskModel — модель задачи для репозитория статистики.

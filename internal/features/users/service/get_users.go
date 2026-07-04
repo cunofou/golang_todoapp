@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
-	core_errors "github.com/cunofou/golang-todoapp/internal/core/errors"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
 )
 
 // GetUsers возвращает список пользователей с пагинацией.

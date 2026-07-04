@@ -6,7 +6,7 @@ package tasks_service
 import (
 	"context"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
 	"github.com/google/uuid"
 )
 

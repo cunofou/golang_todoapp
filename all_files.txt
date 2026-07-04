@@ -1,0 +1,4378 @@
+﻿
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\cmd\todoapp\main.go ===
+// РўРѕС‡РєР° РІС…РѕРґР° РїСЂРёР»РѕР¶РµРЅРёСЏ. Р—РґРµСЃСЊ РїСЂРѕРёСЃС…РѕРґРёС‚:
+//   - РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РєРѕРЅС„РёРіСѓСЂР°С†РёРё Рё Р»РѕРіРіРµСЂР°
+//   - РџРѕРґРєР»СЋС‡РµРЅРёРµ Рє Р±Р°Р·Рµ РґР°РЅРЅС‹С… PostgreSQL
+//   - В«РЎР±РѕСЂРєР°В» РІСЃРµС… С„РёС‡ (Repository в†’ Service в†’ HTTP Handler)
+//   - Р—Р°РїСѓСЃРє HTTP-СЃРµСЂРІРµСЂР° СЃ graceful shutdown
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	core_config "github.com/cunofou/golang_todoapp/internal/core/config"
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_pgx_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool/pgx"
+	core_http_middleware "github.com/cunofou/golang_todoapp/internal/core/transport/http/middleware"
+	core_http_server "github.com/cunofou/golang_todoapp/internal/core/transport/http/server"
+	statistics_postgres_repository "github.com/cunofou/golang_todoapp/internal/features/statistics/repository/postgres"
+	statistics_service "github.com/cunofou/golang_todoapp/internal/features/statistics/service"
+	statistics_transport_http "github.com/cunofou/golang_todoapp/internal/features/statistics/transport/http"
+	tasks_postgres_repository "github.com/cunofou/golang_todoapp/internal/features/tasks/repository/postgres"
+	tasks_service "github.com/cunofou/golang_todoapp/internal/features/tasks/service"
+	tasks_transport_http "github.com/cunofou/golang_todoapp/internal/features/tasks/transport/http"
+	users_postgres_repository "github.com/cunofou/golang_todoapp/internal/features/users/repository/postgres"
+	users_service "github.com/cunofou/golang_todoapp/internal/features/users/service"
+	users_transport_http "github.com/cunofou/golang_todoapp/internal/features/users/transport/http"
+	web_fs_repository "github.com/cunofou/golang_todoapp/internal/features/web/repository/file_system"
+	web_service "github.com/cunofou/golang_todoapp/internal/features/web/service"
+	web_transport_http "github.com/cunofou/golang_todoapp/internal/features/web/transport/http"
+	"go.uber.org/zap"
+
+	// РРјРїРѕСЂС‚ РїР°РєРµС‚Р° docs СЂРµРіРёСЃС‚СЂРёСЂСѓРµС‚ Swagger-СЃРїРµС†РёС„РёРєР°С†РёСЋ РІ РіР»РѕР±Р°Р»СЊРЅРѕР№ РїРµСЂРµРјРµРЅРЅРѕР№.
+	// РЎР°Рј РїР°РєРµС‚ РЅРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РЅР°РїСЂСЏРјСѓСЋ вЂ” РЅСѓР¶РµРЅ С‚РѕР»СЊРєРѕ side-effect РѕС‚ init().
+	_ "github.com/cunofou/golang-todoapp/docs"
+)
+
+// РђРЅРЅРѕС‚Р°С†РёРё РґР»СЏ Р°РІС‚РѕРіРµРЅРµСЂР°С†РёРё Swagger-РґРѕРєСѓРјРµРЅС‚Р°С†РёРё (swaggo/swag).
+// @title        Golang Todo API
+// @version      1.0
+// @description  Todo Application REST-API scheme
+// @host         127.0.0.1:5050
+// @BasePath     /api/v1
+func main() {
+	// Р—Р°РіСЂСѓР¶Р°РµРј РѕР±С‰СѓСЋ РєРѕРЅС„РёРіСѓСЂР°С†РёСЋ РїСЂРёР»РѕР¶РµРЅРёСЏ
+	// NewConfigMust вЂ” РїР°С‚С‚РµСЂРЅ В«MustВ»: РїР°РЅРёРєСѓРµС‚ РїСЂРё РѕС€РёР±РєРµ, С‚.Рє. РЅР° СЃС‚Р°СЂС‚Рµ
+	// РїСЂРёР»РѕР¶РµРЅРёРµ РЅРµ РјРѕР¶РµС‚ РїСЂРѕРґРѕР»Р¶Р°С‚СЊ СЂР°Р±РѕС‚Сѓ СЃ РЅРµРІР°Р»РёРґРЅРѕР№ РєРѕРЅС„РёРіСѓСЂР°С†РёРµР№.
+	cfg := core_config.NewConfigMust()
+	time.Local = cfg.TimeZone
+
+	// РЎРѕР·РґР°С‘Рј РєРѕСЂРЅРµРІРѕР№ РєРѕРЅС‚РµРєСЃС‚, РєРѕС‚РѕСЂС‹Р№ РѕС‚РјРµРЅСЏРµС‚СЃСЏ РїСЂРё РїРѕР»СѓС‡РµРЅРёРё SIGINT/SIGTERM
+	// (Ctrl+C РёР»Рё РєРѕРјР°РЅРґР° `kill`). Р­С‚Рѕ РѕСЃРЅРѕРІР° РґР»СЏ graceful shutdown.
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT, syscall.SIGTERM,
+	)
+	defer cancel()
+
+	// РРЅРёС†РёР°Р»РёР·РёСЂСѓРµРј Р»РѕРіРіРµСЂ РїСЂРёР»РѕР¶РµРЅРёСЏ
+	// РџРёС€РµС‚ РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РІ stdout Рё РІ С„Р°Р№Р» (СЃРј. internal/core/logger).
+	logger, err := core_logger.NewLogger(core_logger.NewConfigMust())
+	if err != nil {
+		fmt.Println("failed to init application logger:", err)
+		os.Exit(1)
+	}
+	defer logger.Close()
+
+	logger.Debug("application time zone", zap.Any("zone", time.Local))
+
+	// РЎРѕР·РґР°С‘Рј РїСѓР»Р» СЃРѕРµРґРёРЅРµРЅРёР№ СЃ PostgreSQL С‡РµСЂРµР· Р±РёР±Р»РёРѕС‚РµРєСѓ pgx.
+	// РџСѓР» РїРµСЂРµРёСЃРїРѕР»СЊР·СѓРµС‚ СЃРѕРµРґРёРЅРµРЅРёСЏ, С‡С‚Рѕ РіРѕСЂР°Р·РґРѕ СЌС„С„РµРєС‚РёРІРЅРµРµ,
+	// С‡РµРј РѕС‚РєСЂС‹РІР°С‚СЊ РЅРѕРІРѕРµ СЃРѕРµРґРёРЅРµРЅРёРµ РЅР° РєР°Р¶РґС‹Р№ SQL Р·Р°РїСЂРѕСЃ.
+	logger.Debug("initializing postgres connection pool")
+	postgresPool, err := core_pgx_pool.NewPool(
+		ctx,
+		core_pgx_pool.NewConfigMust(),
+	)
+	if err != nil {
+		logger.Fatal("failed to init postgres connection pool", zap.Error(err))
+	}
+	defer postgresPool.Close()
+
+	// Р СѓС‡РЅРѕРµ РІРЅРµРґСЂРµРЅРёРµ Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№ (Dependency Injection):
+	// Repository в†’ Service в†’ HTTP Handler.
+	// РљР°Р¶РґС‹Р№ СЃР»РѕР№ Р·РЅР°РµС‚ С‚РѕР»СЊРєРѕ РѕР± РёРЅС‚РµСЂС„РµР№СЃРµ РЅРёР¶РµР»РµР¶Р°С‰РµРіРѕ.
+	// Р­С‚Рѕ РѕР±РµСЃРїРµС‡РёРІР°РµС‚ СЃР»Р°Р±СѓСЋ СЃРІСЏР·Р°РЅРЅРѕСЃС‚СЊ (loose coupling) Рё С‚РµСЃС‚РёСЂСѓРµРјРѕСЃС‚СЊ.
+
+	logger.Debug("initializing feature", zap.String("feature", "users"))
+	usersRepository := users_postgres_repository.NewUsersRepository(postgresPool)
+	usersService := users_service.NewUsersService(usersRepository)
+	usersTransportHTTP := users_transport_http.NewUsersHTTPHandler(usersService)
+
+	logger.Debug("initializing feature", zap.String("feature", "tasks"))
+	tasksRepository := tasks_postgres_repository.NewTasksRepository(postgresPool)
+	tasksService := tasks_service.NewTasksService(tasksRepository)
+	tasksTransportHTTP := tasks_transport_http.NewTasksHTTPHandler(tasksService)
+
+	logger.Debug("initializing feature", zap.String("feature", "statistics"))
+	statisticsRepository := statistics_postgres_repository.NewStatisticsRepository(postgresPool)
+	statisticsService := statistics_service.NewStatisticsService(statisticsRepository)
+	statisticsTransportHTTP := statistics_transport_http.NewStatisticsHTTPHandler(statisticsService)
+
+	logger.Debug("initializing feature", zap.String("feature", "web"))
+	webRepository := web_fs_repository.NewWebRepository()
+	webService := web_service.NewWebService(webRepository)
+	webTransportHTTP := web_transport_http.NewWebHTTPHandler(webService)
+
+	// РЎРѕР±РёСЂР°РµРј HTTP-СЃРµСЂРІРµСЂ СЃ С†РµРїРѕС‡РєРѕР№ middleware.
+	// Middleware РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ РєРѕ РІСЃРµРј РјР°СЂС€СЂСѓС‚Р°Рј (Route) РІ РїРѕСЂСЏРґРєРµ РѕР±СЉСЏРІР»РµРЅРёСЏ:
+	// CORS в†’ RequestID в†’ Logger в†’ Trace в†’ Panic recovery.
+	logger.Debug("initializing HTTP server")
+	httpConfig := core_http_server.NewConfigMust()
+	httpServer := core_http_server.NewHTTPServer(
+		httpConfig,
+		logger,
+		core_http_middleware.CORS(httpConfig.AllowedOrigins),
+		core_http_middleware.RequestID(),
+		core_http_middleware.Logger(logger),
+		core_http_middleware.Trace(),
+		core_http_middleware.Panic(),
+	)
+
+	// Р РµРіРёСЃС‚СЂРёСЂСѓРµРј РјР°СЂС€СЂСѓС‚С‹ API v1.
+	// APIVersionRouter Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РґРѕР±Р°РІР»СЏРµС‚ РїСЂРµС„РёРєСЃ /api/v1 РєРѕ РІСЃРµРј РїСѓС‚СЏРј.
+	apiVersionRouterV1 := core_http_server.NewAPIVersionRouter(core_http_server.ApiVersion1)
+	apiVersionRouterV1.AddRoutes(usersTransportHTTP.Routes()...)
+	apiVersionRouterV1.AddRoutes(tasksTransportHTTP.Routes()...)
+	apiVersionRouterV1.AddRoutes(statisticsTransportHTTP.Routes()...)
+
+	/*
+		РџСЂРёРјРµСЂ СЂРµРіРёСЃС‚СЂР°С†РёРё API v2 СЃ РѕС‚РґРµР»СЊРЅС‹РјРё middleware:
+
+		apiVersionRouterV2 := core_http_server.NewAPIVersionRouter(
+			core_http_server.ApiVersion2,
+			core_http_middleware.Dummy("api v2 middleware"),
+		)
+		apiVersionRouterV2.RegisterRoutes(usersTransportHTTP.Routes()...)
+	*/
+
+	httpServer.RegisterAPIRouters(
+		apiVersionRouterV1,
+		// apiVersionRouterV2,
+	)
+	// Р РµРіРёСЃС‚СЂРёСЂСѓРµРј РјР°СЂС€СЂСѓС‚С‹, РЅРµ РїСЂРёРЅР°РґР»РµР¶Р°С‰РёРµ Рє РєР°РєРѕР№-С‚Рѕ РѕРїСЂРµРґРµР»С‘РЅРЅРѕР№ РІРµСЂСЃРёРё API (РіР»Р°РІРЅР°СЏ СЃС‚СЂР°РЅРёС†Р°).
+	httpServer.RegisterRoutes(webTransportHTTP.Routes()...)
+	// Р РµРіРёСЃС‚СЂРёСЂСѓРµРј Swagger UI РїРѕ Р°РґСЂРµСЃСѓ /swagger/.
+	httpServer.RegisterSwagger()
+
+	// Р—Р°РїСѓСЃРєР°РµРј СЃРµСЂРІРµСЂ. Р‘Р»РѕРєРёСЂСѓРµС‚СЃСЏ РґРѕ РїРѕР»СѓС‡РµРЅРёСЏ СЃРёРіРЅР°Р»Р° Р·Р°РІРµСЂС€РµРЅРёСЏ.
+	// РџРѕСЃР»Рµ СЃРёРіРЅР°Р»Р° РІС‹РїРѕР»РЅСЏРµС‚ graceful shutdown: Р¶РґС‘С‚ Р·Р°РІРµСЂС€РµРЅРёСЏ Р°РєС‚РёРІРЅС‹С… Р·Р°РїСЂРѕСЃРѕРІ.
+	if err := httpServer.Run(ctx); err != nil {
+		logger.Error("HTTP server run error", zap.Error(err))
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\docs\docs.go ===
+package docs
+
+// @title Todo App API
+// @version 1.0
+// @description This is a todo app server.
+// @host localhost:5050
+// @BasePath /
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\config\config.go ===
+package config
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\domain\file.go ===
+// Package domain СЃРѕРґРµСЂР¶РёС‚ РґРѕРјРµРЅРЅС‹Рµ РјРѕРґРµР»Рё Рё Р±РёР·РЅРµСЃ-Р»РѕРіРёРєСѓ РїСЂРёР»РѕР¶РµРЅРёСЏ.
+// Р­С‚Рѕ СЃР°РјС‹Р№ РІРЅСѓС‚СЂРµРЅРЅРёР№ СЃР»РѕР№ Р°СЂС…РёС‚РµРєС‚СѓСЂС‹ вЂ” РѕРЅ РЅРµ Р·Р°РІРёСЃРёС‚ РЅРё РѕС‚ РєР°РєРѕРіРѕ РґСЂСѓРіРѕРіРѕ РїР°РєРµС‚Р° РїСЂРѕРµРєС‚Р°.
+package domain
+
+// File вЂ” РґРѕРјРµРЅРЅР°СЏ СЃСѓС‰РЅРѕСЃС‚СЊ РґР»СЏ С…СЂР°РЅРµРЅРёСЏ СЃРѕРґРµСЂР¶РёРјРѕРіРѕ С„Р°Р№Р»Р° (РЅР°РїСЂРёРјРµСЂ, HTML-СЃС‚СЂР°РЅРёС†С‹).
+// РџРѕР»Рµ buffer РЅР°РјРµСЂРµРЅРЅРѕ РїСЂРёРІР°С‚РЅРѕРµ вЂ” РґРѕСЃС‚СѓРї С‚РѕР»СЊРєРѕ С‡РµСЂРµР· РјРµС‚РѕРґ Buffer(),
+// С‡С‚Рѕ Р·Р°С‰РёС‰Р°РµС‚ РІРЅСѓС‚СЂРµРЅРЅРµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ РѕС‚ СЃР»СѓС‡Р°Р№РЅРѕР№ РјРѕРґРёС„РёРєР°С†РёРё СЃРЅР°СЂСѓР¶Рё.
+type File struct {
+	buffer []byte
+}
+
+// Buffer РІРѕР·РІСЂР°С‰Р°РµС‚ Р±Р°Р№С‚РѕРІРѕРµ СЃРѕРґРµСЂР¶РёРјРѕРµ С„Р°Р№Р»Р°
+func (f *File) Buffer() []byte {
+	return f.buffer
+}
+
+// NewFile СЃРѕР·РґР°С‘С‚ РЅРѕРІС‹Р№ File РёР· РїРµСЂРµРґР°РЅРЅРѕРіРѕ Р±Р°Р№С‚РѕРІРѕРіРѕ Р±СѓС„С„РµСЂР°
+func NewFile(buffer []byte) File {
+	return File{
+		buffer: buffer,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\domain\nullable.go ===
+package domain
+
+// Nullable вЂ” РѕР±РѕР±С‰С‘РЅРЅС‹Р№ С‚РёРї РґР»СЏ СЂР°Р±РѕС‚С‹ СЃ В«С‚СЂС‘С…Р·РЅР°С‡РЅРѕР№В» Р»РѕРіРёРєРѕР№
+//
+// РЎС‚Р°РЅРґР°СЂС‚РЅС‹Р№ *T (СѓРєР°Р·Р°С‚РµР»СЊ) РІ Go РЅРµ РїРѕР·РІРѕР»СЏРµС‚ СЂР°Р·Р»РёС‡РёС‚СЊ РґРІР° СЃР»СѓС‡Р°СЏ:
+//   - РїРѕР»Рµ РІРѕРѕР±С‰Рµ РЅРµ РїРµСЂРµРґР°РЅРѕ (РєР»РёРµРЅС‚ РЅРµ С…РѕС‡РµС‚ РІР·Р°РёРјРѕРґРµР№СЃС‚РІРѕРІР°С‚СЊ СЃРѕ Р·РЅР°С‡РµРЅРёРµРј)
+//   - РїРѕР»Рµ СЏРІРЅРѕ РїРµСЂРµРґР°РЅРѕ РєР°Рє *nil (РєР»РёРµРЅС‚ СЏРІРЅРѕ РїРµСЂРµРґР°С‘С‚ РІ Р·РЅР°С‡РµРЅРёРё *nil)
+//
+// Р—РЅР°С‡РµРЅРёСЏ РїРѕР»РµР№:
+//   - Set=false           в†’ РїРѕР»Рµ РЅРµ Р±С‹Р»Рѕ РїРµСЂРµРґР°РЅРѕ (Value РЅРµ РёРјРµРµС‚ СЃРјС‹СЃР»Р°) в†’ РЅРёС‡РµРіРѕ РЅРµ РґРµР»Р°РµРј
+//   - Set=true, Value=nil в†’ РїРѕР»Рµ РїРµСЂРµРґР°РЅРѕ СЃРѕ Р·РЅР°С‡РµРЅРёРµРј *nil               в†’ РЅР°РїСЂРёРјРµСЂ, РѕС‡РёСЃС‚РёС‚СЊ РІ Р‘Р”
+//   - Set=true, Value=&v  в†’ РїРѕР»Рµ РїРµСЂРµРґР°РЅРѕ СЃ РєРѕРЅРєСЂРµС‚РЅС‹Рј Р·РЅР°С‡РµРЅРёРµРј v        в†’ РЅР°РїСЂРёРјРµСЂ, РѕР±РЅРѕРІРёС‚СЊ РІ Р‘Р”
+type Nullable[T any] struct {
+	Value *T
+	Set   bool
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\domain\statistics.go ===
+package domain
+
+import (
+	"time"
+)
+
+// Statistics вЂ” РґРѕРјРµРЅРЅР°СЏ РјРѕРґРµР»СЊ Р°РіСЂРµРіРёСЂРѕРІР°РЅРЅРѕР№ СЃС‚Р°С‚РёСЃС‚РёРєРё РїРѕ Р·Р°РґР°С‡Р°Рј.
+// РџРѕР»СЏ-СѓРєР°Р·Р°С‚РµР»Рё (*float64, *time.Duration) РѕР·РЅР°С‡Р°СЋС‚, С‡С‚Рѕ Р·РЅР°С‡РµРЅРёРµ РјРѕР¶РµС‚
+// РѕС‚СЃСѓС‚СЃС‚РІРѕРІР°С‚СЊ: РЅР°РїСЂРёРјРµСЂ, РµСЃР»Рё РЅРµС‚ РЅРё РѕРґРЅРѕР№ Р·Р°РІРµСЂС€С‘РЅРЅРѕР№ Р·Р°РґР°С‡Рё,
+// СЃСЂРµРґРЅРµРµ РІСЂРµРјСЏ РІС‹РїРѕР»РЅРµРЅРёСЏ РЅРµ РёРјРµРµС‚ СЃРјС‹СЃР»Р° Рё Р±СѓРґРµС‚ nil.
+type Statistics struct {
+	TasksCreated               int
+	TasksCompleted             int
+	TasksCompletedRate         *float64       // РїСЂРѕС†РµРЅС‚ РІС‹РїРѕР»РЅРµРЅРЅС‹С… Р·Р°РґР°С‡ (nil РµСЃР»Рё Р·Р°РґР°С‡ РЅРµС‚)
+	TasksAverageCompletionTime *time.Duration // СЃСЂРµРґРЅРµРµ РІСЂРµРјСЏ РІС‹РїРѕР»РЅРµРЅРёСЏ (nil РµСЃР»Рё РЅРµС‚ РІС‹РїРѕР»РЅРµРЅРЅС‹С…)
+}
+
+// CreateStatistics РІС‹С‡РёСЃР»СЏРµС‚ СЃС‚Р°С‚РёСЃС‚РёРєСѓ РёР· РЅР°Р±РѕСЂР° Р·Р°РґР°С‡.
+func CreateStatistics(tasks []Task) Statistics {
+	if len(tasks) == 0 {
+		return NewStatistics(0, 0, nil, nil)
+	}
+
+	tasksCreated := len(tasks)
+
+	tasksCompleted := 0
+	var totalCompletionDuration time.Duration
+	for _, task := range tasks {
+		if task.Completed {
+			tasksCompleted++
+		}
+
+		// CompletionDuration() РІРѕР·РІСЂР°С‰Р°РµС‚ nil РґР»СЏ РЅРµР·Р°РІРµСЂС€С‘РЅРЅС‹С… Р·Р°РґР°С‡,
+		// РїРѕСЌС‚РѕРјСѓ СЃСѓРјРјРёСЂСѓРµРј С‚РѕР»СЊРєРѕ СЂРµР°Р»СЊРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ.
+		completionDuration := task.CompletionDuration()
+		if completionDuration != nil {
+			totalCompletionDuration += *completionDuration
+		}
+	}
+
+	tasksCompletedRate := float64(tasksCompleted) / float64(tasksCreated) * 100
+
+	// РЎСЂРµРґРЅРµРµ РІСЂРµРјСЏ РІС‹С‡РёСЃР»СЏРµРј С‚РѕР»СЊРєРѕ РµСЃР»Рё РµСЃС‚СЊ С…РѕС‚СЏ Р±С‹ РѕРґРЅР° Р·Р°РІРµСЂС€С‘РЅРЅР°СЏ Р·Р°РґР°С‡Р°.
+	var tasksAverageCompletionTime *time.Duration
+	if tasksCompleted > 0 && totalCompletionDuration != 0 {
+		avg := totalCompletionDuration / time.Duration(tasksCompleted)
+
+		tasksAverageCompletionTime = &avg
+	}
+
+	return NewStatistics(
+		tasksCreated,
+		tasksCompleted,
+		&tasksCompletedRate,
+		tasksAverageCompletionTime,
+	)
+}
+
+// NewStatistics вЂ” РєРѕРЅСЃС‚СЂСѓРєС‚РѕСЂ РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РѕР±СЉРµРєС‚Р° Statistics РёР· РіРѕС‚РѕРІС‹С… РґР°РЅРЅС‹С…
+func NewStatistics(
+	tasksCreated int,
+	tasksCompleted int,
+	tasksCompletedRate *float64,
+	tasksAverageCompletionTime *time.Duration,
+) Statistics {
+	return Statistics{
+		TasksCreated:               tasksCreated,
+		TasksCompleted:             tasksCompleted,
+		TasksCompletedRate:         tasksCompletedRate,
+		TasksAverageCompletionTime: tasksAverageCompletionTime,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\domain\task.go ===
+package domain
+
+import "time"
+
+type Task struct {
+    ID          string     `json:"id"`
+    Title       string     `json:"title"`
+    Description string     `json:"description"`
+    Status      string     `json:"status"`
+    UserID      string     `json:"user_id"`
+    Completed   bool       `json:"completed"`
+    CreatedAt   time.Time  `json:"created_at"`
+    UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// CompletionDuration РІРѕР·РІСЂР°С‰Р°РµС‚ РІСЂРµРјСЏ РІС‹РїРѕР»РЅРµРЅРёСЏ Р·Р°РґР°С‡Рё (РµСЃР»Рё Р·Р°РІРµСЂС€РµРЅР°)
+func (t *Task) CompletionDuration() *time.Duration {
+    if !t.Completed {
+        return nil
+    }
+    duration := t.UpdatedAt.Sub(t.CreatedAt)
+    return &duration
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\domain\user.go ===
+package domain
+
+type User struct {
+	ID      int
+	Version int
+
+	FullName    string
+	PhoneNumber *string
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\errors\common.go ===
+// Package core_errors СЃРѕРґРµСЂР¶РёС‚ sentinel-РѕС€РёР±РєРё, РѕР±С‰РёРµ РґР»СЏ РІСЃРµРіРѕ РїСЂРёР»РѕР¶РµРЅРёСЏ.
+//
+// Sentinel-РѕС€РёР±РєРё (РїРµСЂРµРјРµРЅРЅС‹Рµ С‚РёРїР° error) РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ РґР»СЏ РїСЂРѕРІРµСЂРєРё С‡РµСЂРµР·
+// errors.Is(). Р­С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚ СЃР»РѕСЏРј РїСЂРёР»РѕР¶РµРЅРёСЏ РїСЂРёРЅРёРјР°С‚СЊ СЂРµС€РµРЅРёРµ Рѕ
+// СЃРІРѕРёС… РґР°Р»СЊРЅРµР№С€РёС… РґРµР№СЃС‚РІРёСЏС… РЅР° РѕСЃРЅРѕРІРµ РїРѕР»СѓС‡РµРЅРЅРѕР№ РѕС€РёР±РєРё,
+// РЅРµ Р·РЅР°СЏ РґРµС‚Р°Р»РµР№ СЂРµР°Р»РёР·Р°С†РёРё РЅРёР·Р»РµР¶Р°С‰РёС… СЃР»РѕС‘РІ.
+//
+// РџСЂРёРјРµСЂ: РµСЃР»Рё СЂРµРїРѕР·РёС‚РѕСЂРёР№ РІРµСЂРЅСѓР» errors.Is(err, ErrNotFound) == true,
+// HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРє РѕС‚РІРµС‚РёС‚ СЃС‚Р°С‚СѓСЃРѕРј 404.
+package core_errors
+
+import "errors"
+
+var (
+	// ErrNotFound вЂ” Р·Р°РїСЂР°С€РёРІР°РµРјР°СЏ СЃСѓС‰РЅРѕСЃС‚СЊ РЅРµ РЅР°Р№РґРµРЅР° (HTTP 404).
+	ErrNotFound = errors.New("not found")
+
+	// ErrInvalidArgument вЂ” РїРµСЂРµРґР°РЅС‹ РЅРµРєРѕСЂСЂРµРєС‚РЅС‹Рµ РґР°РЅРЅС‹Рµ (HTTP 400).
+	ErrInvalidArgument = errors.New("invalid argument")
+
+	// ErrConflict вЂ” РєРѕРЅС„Р»РёРєС‚ РїСЂРё РѕР±РЅРѕРІР»РµРЅРёРё, РѕР±С‹С‡РЅРѕ РёР·-Р·Р° РєРѕРЅРєСѓСЂРµРЅС‚РЅРѕРіРѕ
+	// РёР·РјРµРЅРµРЅРёСЏ С‚РѕР№ Р¶Рµ Р·Р°РїРёСЃРё (HTTP 409).
+	ErrConflict = errors.New("conflict")
+)
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\logger\config.go ===
+package core_logger
+
+import (
+	"fmt"
+
+	"github.com/kelseyhightower/envconfig"
+)
+
+// Config С…СЂР°РЅРёС‚ РЅР°СЃС‚СЂРѕР№РєРё Р»РѕРіРіРµСЂР°, С‡РёС‚Р°РµРјС‹Рµ РёР· РїРµСЂРµРјРµРЅРЅС‹С… РѕРєСЂСѓР¶РµРЅРёСЏ.
+// Р‘РёР±Р»РёРѕС‚РµРєР° kelseyhightower/envconfig Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё Р·Р°РїРѕР»РЅСЏРµС‚ РїРѕР»СЏ РёР· env-РїРµСЂРµРјРµРЅРЅС‹С…
+// СЃ РїСЂРµС„РёРєСЃРѕРј "LOGGER_": LOGGER_LEVEL, LOGGER_FOLDER.
+type Config struct {
+	// Level вЂ” РјРёРЅРёРјР°Р»СЊРЅС‹Р№ СѓСЂРѕРІРµРЅСЊ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ: DEBUG, INFO, WARN, ERROR.
+	Level string `envconfig:"LEVEL" default:"DEBUG"`
+
+	// Folder вЂ” РґРёСЂРµРєС‚РѕСЂРёСЏ, РІ РєРѕС‚РѕСЂРѕР№ Р±СѓРґСѓС‚ СЃРѕР·РґР°РІР°С‚СЊСЃСЏ С„Р°Р№Р»С‹ Р»РѕРіРѕРІ.
+	// РљР°Р¶РґС‹Р№ Р·Р°РїСѓСЃРє РїСЂРёР»РѕР¶РµРЅРёСЏ СЃРѕР·РґР°С‘С‚ РЅРѕРІС‹Р№ С„Р°Р№Р» СЃ timestamp РІ РёРјРµРЅРё.
+	Folder string `envconfig:"FOLDER" required:"true"`
+}
+
+// NewConfig С‡РёС‚Р°РµС‚ РєРѕРЅС„РёРіСѓСЂР°С†РёСЋ Р»РѕРіРіРµСЂР° РёР· РїРµСЂРµРјРµРЅРЅС‹С… РѕРєСЂСѓР¶РµРЅРёСЏ.
+func NewConfig() (Config, error) {
+	var config Config
+
+	if err := envconfig.Process("LOGGER", &config); err != nil {
+		return Config{}, fmt.Errorf("process envconfig: %w", err)
+	}
+
+	return config, nil
+}
+
+// NewConfigMust вЂ” В«MustВ»-РІР°СЂРёР°РЅС‚ РєРѕРЅСЃС‚СЂСѓРєС‚РѕСЂР°: РїР°РЅРёРєСѓРµС‚ РїСЂРё РѕС€РёР±РєРµ.
+func NewConfigMust() Config {
+	config, err := NewConfig()
+	if err != nil {
+		err = fmt.Errorf("get Logger config: %w", err)
+		panic(err)
+	}
+
+	return config
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\logger\logger.go ===
+// Package core_logger РїСЂРµРґРѕСЃС‚Р°РІР»СЏРµС‚ СЃС‚СЂСѓРєС‚СѓСЂРёСЂРѕРІР°РЅРЅС‹Р№ Р»РѕРіРіРµСЂ РЅР° Р±Р°Р·Рµ go.uber.org/zap.
+// Р›РѕРіРё РїРёС€СѓС‚СЃСЏ РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РІ stdout Рё РІ С„Р°Р№Р».
+//
+// Р›РѕРіРіРµСЂ РїРµСЂРµРґР°С‘С‚СЃСЏ С‡РµСЂРµР· context.Context (РїР°С‚С‚РµСЂРЅ В«logger in contextВ»),
+// С‡С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё РґРѕР±Р°РІР»СЏС‚СЊ Рє РєР°Р¶РґРѕРјСѓ СЃРѕРѕР±С‰РµРЅРёСЋ
+// request_id Рё РґСЂСѓРіРёРµ РїРѕР»СЏ, СѓСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РІ middleware.
+package core_logger
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+// loggerContextKey вЂ” РїСЂРёРІР°С‚РЅС‹Р№ С‚РёРї РєР»СЋС‡Р° РґР»СЏ context.WithValue.
+// РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РѕС‚РґРµР»СЊРЅРѕРіРѕ С‚РёРїР° (Р° РЅРµ string) РёСЃРєР»СЋС‡Р°РµС‚ РєРѕР»Р»РёР·РёРё РєР»СЋС‡РµР№
+// СЃ РґСЂСѓРіРёРјРё РїР°РєРµС‚Р°РјРё, РєРѕС‚РѕСЂС‹Рµ С‚РѕР¶Рµ С…СЂР°РЅСЏС‚ РґР°РЅРЅС‹Рµ РІ РєРѕРЅС‚РµРєСЃС‚Рµ.
+type loggerContextKey struct{}
+
+var (
+	key = loggerContextKey{}
+)
+
+// Logger вЂ” РѕР±С‘СЂС‚РєР° РЅР°Рґ *zap.Logger, РєРѕС‚РѕСЂР°СЏ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅРѕ С…СЂР°РЅРёС‚
+// С„Р°Р№Р»РѕРІС‹Р№ РґРµСЃРєСЂРёРїС‚РѕСЂ РґР»СЏ РєРѕСЂСЂРµРєС‚РЅРѕРіРѕ Р·Р°РєСЂС‹С‚РёСЏ РїСЂРё Р·Р°РІРµСЂС€РµРЅРёРё РїСЂРёР»РѕР¶РµРЅРёСЏ.
+type Logger struct {
+	*zap.Logger
+
+	file *os.File
+}
+
+// ToContext РєР»Р°РґС‘С‚ Р»РѕРіРіРµСЂ РІ РєРѕРЅС‚РµРєСЃС‚. Р’С‹Р·С‹РІР°РµС‚СЃСЏ РІ middleware Logger,
+// С‡С‚РѕР±С‹ РІСЃРµ РїРѕСЃР»РµРґСѓСЋС‰РёРµ РѕР±СЂР°Р±РѕС‚С‡РёРєРё РјРѕРіР»Рё РїРѕР»СѓС‡РёС‚СЊ Р»РѕРіРіРµСЂ СЃ request_id.
+func ToContext(ctx context.Context, log *Logger) context.Context {
+	return context.WithValue(
+		ctx,
+		key,
+		log,
+	)
+}
+
+// FromContext РёР·РІР»РµРєР°РµС‚ Р»РѕРіРіРµСЂ РёР· РєРѕРЅС‚РµРєСЃС‚Р°.
+// РџР°РЅРёРєСѓРµС‚, РµСЃР»Рё Р»РѕРіРіРµСЂ РЅРµ Р±С‹Р» РґРѕР±Р°РІР»РµРЅ вЂ” СЌС‚Рѕ РїСЂРѕРіСЂР°РјРјРЅР°СЏ РѕС€РёР±РєР°,
+// РѕР·РЅР°С‡Р°СЋС‰Р°СЏ, С‡С‚Рѕ middleware Logger РЅРµ Р±С‹Р» РїРѕРґРєР»СЋС‡С‘РЅ.
+func FromContext(ctx context.Context) *Logger {
+	log, ok := ctx.Value(key).(*Logger)
+	if !ok {
+		panic("no logger in context")
+	}
+
+	return log
+}
+
+// NewLogger СЃРѕР·РґР°С‘С‚ Р»РѕРіРіРµСЂ, РєРѕС‚РѕСЂС‹Р№ РїРёС€РµС‚ РІ stdout Рё РІ С„Р°Р№Р» РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ.
+// РљР°Р¶РґС‹Р№ Р·Р°РїСѓСЃРє СЃРѕР·РґР°С‘С‚ РЅРѕРІС‹Р№ Р»РѕРі-С„Р°Р№Р» СЃ РёРјРµРЅРµРј РІРёРґР° "2006-01-02T15-04-05.000000.log".
+//
+// zapcore.NewTee РѕР±СЉРµРґРёРЅСЏРµС‚ РЅРµСЃРєРѕР»СЊРєРѕ В«СЏРґРµСЂВ» (outputs) РІ РѕРґРЅРѕ:
+// Р·Р°РїРёСЃСЊ РІ РѕРґРЅРѕ СЏРґСЂРѕ вЂ” Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё Р·Р°РїРёСЃСЊ РІРѕ РІСЃРµ.
+func NewLogger(config Config) (*Logger, error) {
+	zapLvl := zap.NewAtomicLevel()
+	if err := zapLvl.UnmarshalText([]byte(config.Level)); err != nil {
+		return nil, fmt.Errorf("unmarshal log level: %w", err)
+	}
+
+	if err := os.MkdirAll(config.Folder, 0755); err != nil {
+		return nil, fmt.Errorf("mkdir log folder: %w", err)
+	}
+
+	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05.000000")
+	logFilePath := filepath.Join(
+		config.Folder,
+		fmt.Sprintf("%s.log", timestamp),
+	)
+
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+
+	zapConfig := zap.NewDevelopmentEncoderConfig()
+	zapConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02T15:04:05.000000")
+
+	// ConsoleEncoder вЂ” С‡РµР»РѕРІРµРєРѕС‡РёС‚Р°РµРјС‹Р№ С„РѕСЂРјР°С‚ (РЅРµ JSON), СѓРґРѕР±РµРЅ РґР»СЏ СЂР°Р·СЂР°Р±РѕС‚РєРё.
+	zapEncoder := zapcore.NewConsoleEncoder(zapConfig)
+
+	// NewTee РЅР°РїСЂР°РІР»СЏРµС‚ Р»РѕРіРё РѕРґРЅРѕРІСЂРµРјРµРЅРЅРѕ РІ stdout Рё РІ С„Р°Р№Р».
+	core := zapcore.NewTee(
+		zapcore.NewCore(zapEncoder, zapcore.AddSync(os.Stdout), zapLvl),
+		zapcore.NewCore(zapEncoder, zapcore.AddSync(logFile), zapLvl),
+	)
+
+	// zap.AddCaller() РґРѕР±Р°РІР»СЏРµС‚ Рє РєР°Р¶РґРѕРјСѓ СЃРѕРѕР±С‰РµРЅРёСЋ РёРјСЏ С„Р°Р№Р»Р° Рё СЃС‚СЂРѕРєСѓ.
+	zapLogger := zap.New(core, zap.AddCaller())
+
+	return &Logger{
+		Logger: zapLogger,
+		file:   logFile,
+	}, nil
+}
+
+// With СЃРѕР·РґР°С‘С‚ РґРѕС‡РµСЂРЅРёР№ Р»РѕРіРіРµСЂ СЃ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹РјРё РїРѕР»СЏРјРё.
+// РџРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј РјРµС‚РѕРґ, С‡С‚РѕР±С‹ РІРѕР·РІСЂР°С‰Р°С‚СЊ *core_logger.Logger (СЃ С„Р°Р№Р»РѕРј),
+// Р° РЅРµ Р±Р°Р·РѕРІС‹Р№ *zap.Logger.
+func (l *Logger) With(field ...zap.Field) *Logger {
+	return &Logger{
+		Logger: l.Logger.With(field...),
+		file:   l.file,
+	}
+}
+
+// Close Р·Р°РєСЂС‹РІР°РµС‚ С„Р°Р№Р» Р»РѕРіРѕРІ. Р”РѕР»Р¶РµРЅ РІС‹Р·С‹РІР°С‚СЊСЃСЏ С‡РµСЂРµР· defer РІ main().
+func (l *Logger) Close() {
+	if err := l.file.Close(); err != nil {
+		fmt.Println("failed to close application logger:", err)
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\errors.go ===
+package core_postgres_pool
+
+import "errors"
+
+// Sentinel-РѕС€РёР±РєРё СѓСЂРѕРІРЅСЏ РїСѓР»Р° СЃРѕРµРґРёРЅРµРЅРёР№.
+// РђРґР°РїС‚РµСЂ pgx РїСЂРµРѕР±СЂР°Р·СѓРµС‚ СЃРїРµС†РёС„РёС‡РµСЃРєРёРµ РѕС€РёР±РєРё pgx РІ СЌС‚Рё С‚РёРїРёР·РёСЂРѕРІР°РЅРЅС‹Рµ РѕС€РёР±РєРё,
+// РїРѕР·РІРѕР»СЏСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏРј СЂР°Р±РѕС‚Р°С‚СЊ СЃ РЅРёРјРё Р±РµР· Р·Р°РІРёСЃРёРјРѕСЃС‚Рё РѕС‚ pgx.
+var (
+	// ErrNoRows вЂ” Р·Р°РїСЂРѕСЃ РЅРµ РІРµСЂРЅСѓР» СЃС‚СЂРѕРє.
+	// Р РµРїРѕР·РёС‚РѕСЂРёР№ РїСЂРµРѕР±СЂР°Р·СѓРµС‚ СЌС‚Рѕ РІ core_errors.ErrNotFound.
+	ErrNoRows = errors.New("no rows")
+
+	// ErrViolatesForeignKey вЂ” РЅР°СЂСѓС€РµРЅРёРµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ РІРЅРµС€РЅРµРіРѕ РєР»СЋС‡Р° (PostgreSQL РєРѕРґ 23503).
+	// РќР°РїСЂРёРјРµСЂ: РїРѕРїС‹С‚РєР° СЃРѕР·РґР°С‚СЊ Р·Р°РґР°С‡Сѓ СЃ РЅРµСЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРј author_user_id.
+	ErrViolatesForeignKey = errors.New("violates foreign key")
+
+	// ErrUnknown вЂ” Р»СЋР±Р°СЏ РґСЂСѓРіР°СЏ РѕС€РёР±РєР° Р±Р°Р·С‹ РґР°РЅРЅС‹С…, РЅРµ РѕР±СЂР°Р±РѕС‚Р°РЅРЅР°СЏ СЏРІРЅРѕ.
+	ErrUnknown = errors.New("unknown")
+)
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\pool.go ===
+// Package core_postgres_pool РѕРїСЂРµРґРµР»СЏРµС‚ РёРЅС‚РµСЂС„РµР№СЃС‹ РґР»СЏ СЂР°Р±РѕС‚С‹ СЃ PostgreSQL.
+//
+// РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РёРЅС‚РµСЂС„РµР№СЃРѕРІ РІРјРµСЃС‚Рѕ РєРѕРЅРєСЂРµС‚РЅС‹С… С‚РёРїРѕРІ РѕРїСЂРµРґРµР»С‘РЅРЅРѕР№ Р±РёР±Р»РёРѕС‚РµРєРё РїРѕР·РІРѕР»СЏРµС‚:
+//   - РР·РѕР»РёСЂРѕРІР°С‚СЊ СЂРµРїРѕР·РёС‚РѕСЂРёРё РѕС‚ РєРѕРЅРєСЂРµС‚РЅРѕР№ Р±РёР±Р»РёРѕС‚РµРєРё-РґСЂР°Р№РІРµСЂР°
+//   - РџРѕРґРјРµРЅСЏС‚СЊ СЂРµР°Р»РёР·Р°С†РёСЋ РІ С‚РµСЃС‚Р°С… (mock-РѕР±СЉРµРєС‚С‹)
+//   - Р›РµРіРєРѕ РјРёРіСЂРёСЂРѕРІР°С‚СЊ РЅР° РґСЂСѓРіРѕР№ РґСЂР°Р№РІРµСЂ Р±РµР· РёР·РјРµРЅРµРЅРёСЏ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєРё
+package core_postgres_pool
+
+import (
+	"context"
+	"time"
+)
+
+// Pool вЂ” РёРЅС‚РµСЂС„РµР№СЃ РїСѓР»Р° СЃРѕРµРґРёРЅРµРЅРёР№ СЃ Р±Р°Р·РѕР№ РґР°РЅРЅС‹С….
+// РљРѕРЅРєСЂРµС‚РЅР°СЏ СЂРµР°Р»РёР·Р°С†РёСЏ вЂ” РІ РїР°РєРµС‚Рµ pgx (internal/core/repository/postgres/pool/pgx).
+//
+// OpTimeout() РІРѕР·РІСЂР°С‰Р°РµС‚ РјР°РєСЃРёРјР°Р»СЊРЅРѕРµ РІСЂРµРјСЏ РІС‹РїРѕР»РЅРµРЅРёСЏ РѕРґРЅРѕРіРѕ Р·Р°РїСЂРѕСЃР° Рє Р‘Р”.
+type Pool interface {
+	Query(ctx context.Context, sql string, args ...any) (Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) Row
+	Exec(ctx context.Context, sql string, arguments ...any) (CommandTag, error)
+	Close()
+
+	OpTimeout() time.Duration
+}
+
+// Rows вЂ” РёРЅС‚РµСЂС„РµР№СЃ РґР»СЏ РёС‚РµСЂР°С†РёРё РїРѕ СЂРµР·СѓР»СЊС‚Р°С‚Р°Рј SELECT-Р·Р°РїСЂРѕСЃР° (РЅРµСЃРєРѕР»СЊРєРѕ СЃС‚СЂРѕРє).
+type Rows interface {
+	Close()
+	Err() error
+	Next() bool
+	Scan(dest ...any) error
+}
+
+// Row вЂ” РёРЅС‚РµСЂС„РµР№СЃ РґР»СЏ РїРѕР»СѓС‡РµРЅРёСЏ РѕРґРЅРѕР№ СЃС‚СЂРѕРєРё (QueryRow).
+type Row interface {
+	Scan(dest ...any) error
+}
+
+// CommandTag вЂ” СЂРµР·СѓР»СЊС‚Р°С‚ DML-Р·Р°РїСЂРѕСЃР° (INSERT, UPDATE, DELETE).
+type CommandTag interface {
+	RowsAffected() int64
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\pgx\adapters.go ===
+// Package core_pgx_pool СЃРѕРґРµСЂР¶РёС‚ РєРѕРЅРєСЂРµС‚РЅСѓСЋ СЂРµР°Р»РёР·Р°С†РёСЋ РёРЅС‚РµСЂС„РµР№СЃР° Pool
+// РЅР° Р±Р°Р·Рµ Р±РёР±Р»РёРѕС‚РµРєРё jackc/pgx/v5 вЂ” РѕРґРЅРѕРіРѕ РёР· СЃР°РјС‹С… РїРѕРїСѓР»СЏСЂРЅС‹С…
+// Рё РїСЂРѕРёР·РІРѕРґРёС‚РµР»СЊРЅС‹С… РґСЂР°Р№РІРµСЂРѕРІ PostgreSQL РґР»СЏ Go.
+package core_pgx_pool
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// pgxRows РѕР±РѕСЂР°С‡РёРІР°РµС‚ pgx.Rows РґР»СЏ СЂРµР°Р»РёР·Р°С†РёРё РёРЅС‚РµСЂС„РµР№СЃР° core_postgres_pool.Rows.
+// Р’СЃС‚СЂР°РёРІР°РЅРёРµ pgx.Rows РґР°С‘С‚ РІСЃРµ РјРµС‚РѕРґС‹ (Next, Close, Err, Scan) В«Р±РµСЃРїР»Р°С‚РЅРѕВ».
+type pgxRows struct {
+	pgx.Rows
+}
+
+// pgxRow РѕР±РѕСЂР°С‡РёРІР°РµС‚ pgx.Row РґР»СЏ СЂРµР°Р»РёР·Р°С†РёРё РёРЅС‚РµСЂС„РµР№СЃР° core_postgres_pool.Row.
+// РџРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј Scan, С‡С‚РѕР±С‹ РїСЂРµРѕР±СЂР°Р·РѕРІС‹РІР°С‚СЊ pgx-РѕС€РёР±РєРё РІ РЅР°С€Рё С‚РёРїРёР·РёСЂРѕРІР°РЅРЅС‹Рµ РѕС€РёР±РєРё.
+type pgxRow struct {
+	pgx.Row
+}
+
+// Scan РІС‹Р·С‹РІР°РµС‚ РѕСЂРёРіРёРЅР°Р»СЊРЅС‹Р№ pgx Scan Рё РїСЂРµРѕР±СЂР°Р·СѓРµС‚ РѕС€РёР±РєРё С‡РµСЂРµР· mapErrors.
+func (r pgxRow) Scan(dest ...any) error {
+	err := r.Row.Scan(dest...)
+	if err != nil {
+		return mapErrors(err)
+	}
+
+	return nil
+}
+
+// pgxCommandTag РѕР±РѕСЂР°С‡РёРІР°РµС‚ pgconn.CommandTag РґР»СЏ СЂРµР°Р»РёР·Р°С†РёРё РёРЅС‚РµСЂС„РµР№СЃР° CommandTag.
+type pgxCommandTag struct {
+	pgconn.CommandTag
+}
+
+// mapErrors РїСЂРµРѕР±СЂР°Р·СѓРµС‚ СЃРїРµС†РёС„РёС‡РµСЃРєРёРµ РѕС€РёР±РєРё pgx РІ С‚РёРїРёР·РёСЂРѕРІР°РЅРЅС‹Рµ РѕС€РёР±РєРё РїР°РєРµС‚Р° pool.
+// Р­С‚Рѕ В«Р°РЅС‚РёРєРѕСЂСЂСѓРїС†РёРѕРЅРЅС‹Р№ СЃР»РѕР№В» (Anti-Corruption Layer) вЂ” РёР·РѕР»РёСЂСѓРµС‚ РґРµС‚Р°Р»Рё pgx
+// РѕС‚ РѕСЃС‚Р°Р»СЊРЅРѕРіРѕ РєРѕРґР° РїСЂРёР»РѕР¶РµРЅРёСЏ.
+func mapErrors(err error) error {
+	const (
+		// РљРѕРґ PostgreSQL РґР»СЏ РѕС€РёР±РєРё РЅР°СЂСѓС€РµРЅРёСЏ РІРЅРµС€РЅРµРіРѕ РєР»СЋС‡Р°.
+		// РџРѕР»РЅС‹Р№ СЃРїРёСЃРѕРє РєРѕРґРѕРІ: https://www.postgresql.org/docs/current/errcodes-appendix.html
+		pgxViolatesForeignKeyErrorCode = "23503"
+	)
+
+	// pgx.ErrNoRows в†’ РЅР°С€ ErrNoRows (Р·Р°РїРёСЃСЊ РЅРµ РЅР°Р№РґРµРЅР°)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core_postgres_pool.ErrNoRows
+	}
+
+	// РџСЂРѕРІРµСЂСЏРµРј, СЏРІР»СЏРµС‚СЃСЏ Р»Рё РѕС€РёР±РєР° СЃС‚СЂСѓРєС‚СѓСЂРёСЂРѕРІР°РЅРЅРѕР№ PostgreSQL-РѕС€РёР±РєРѕР№.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		if pgErr.Code == pgxViolatesForeignKeyErrorCode {
+			return fmt.Errorf(
+				"%v: %w",
+				err,
+				core_postgres_pool.ErrViolatesForeignKey,
+			)
+		}
+	}
+
+	// Р’СЃРµ РѕСЃС‚Р°Р»СЊРЅС‹Рµ РѕС€РёР±РєРё РѕР±РѕСЂР°С‡РёРІР°РµРј РІ ErrUnknown.
+	return fmt.Errorf(
+		"%v: %w",
+		err,
+		core_postgres_pool.ErrUnknown,
+	)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\pgx\config.go ===
+package core_pgx_pool
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/kelseyhightower/envconfig"
+)
+
+// Config С…СЂР°РЅРёС‚ РїР°СЂР°РјРµС‚СЂС‹ РїРѕРґРєР»СЋС‡РµРЅРёСЏ Рє PostgreSQL.
+// Р’СЃРµ РїРѕР»СЏ С‡РёС‚Р°СЋС‚СЃСЏ РёР· РїРµСЂРµРјРµРЅРЅС‹С… РѕРєСЂСѓР¶РµРЅРёСЏ СЃ РїСЂРµС„РёРєСЃРѕРј "POSTGRES_":
+// POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_TIMEOUT.
+type Config struct {
+	Host     string `envconfig:"HOST"     required:"true"`
+	Port     string `envconfig:"PORT"     default:"5432"`
+	User     string `envconfig:"USER"     required:"true"`
+	Password string `envconfig:"PASSWORD" required:"true"`
+	Database string `envconfig:"DB"       required:"true"`
+
+	// Timeout вЂ” РјР°РєСЃРёРјР°Р»СЊРЅРѕРµ РІСЂРµРјСЏ РІС‹РїРѕР»РЅРµРЅРёСЏ РѕРґРЅРѕРіРѕ Р·Р°РїСЂРѕСЃР° Рє Р±Р°Р·Рµ РґР°РЅРЅС‹С….
+	// РСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏРјРё С‡РµСЂРµР· Pool.OpTimeout() + context.WithTimeout.
+	Timeout time.Duration `envconfig:"TIMEOUT"  required:"true"`
+}
+
+// NewConfig С‡РёС‚Р°РµС‚ РєРѕРЅС„РёРіСѓСЂР°С†РёСЋ РїСѓР»Р° РёР· РїРµСЂРµРјРµРЅРЅС‹С… РѕРєСЂСѓР¶РµРЅРёСЏ.
+func NewConfig() (Config, error) {
+	var config Config
+
+	if err := envconfig.Process("POSTGRES", &config); err != nil {
+		return Config{}, fmt.Errorf("process envconfig: %w", err)
+	}
+
+	return config, nil
+}
+
+// NewConfigMust вЂ” В«MustВ»-РІР°СЂРёР°РЅС‚ РєРѕРЅСЃС‚СЂСѓРєС‚РѕСЂР°: РїР°РЅРёРєСѓРµС‚ РїСЂРё РѕС€РёР±РєРµ.
+func NewConfigMust() Config {
+	config, err := NewConfig()
+	if err != nil {
+		err = fmt.Errorf("get Postgres connection pool config: %w", err)
+		panic(err)
+	}
+
+	return config
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\pgx\pool.go ===
+package pgx
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+package core_pgx_pool
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	core_postgres_pool "github.com/
+)
+
+// Pool вЂ” РєРѕРЅРєСЂРµС‚РЅР°СЏ СЂРµР°Р»РёР·Р°С†РёСЏ РёРЅС‚РµСЂС„РµР№СЃР° core_postgres_pool.Pool
+// РЅР° Р±Р°Р·Рµ pgxpool.Pool (РїСѓР» СЃРѕРµРґРёРЅРµРЅРёР№ pgx).
+//
+// Р’СЃС‚СЂР°РёРІР°РЅРёРµ *pgxpool.Pool РґР°С‘С‚ РґРѕСЃС‚СѓРї РєРѕ РІСЃРµРј РјРµС‚РѕРґР°Рј pgx,
+// РЅРѕ РјС‹ РїРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј Query/QueryRow/Exec, С‡С‚РѕР±С‹:
+//  1. РћР±РѕСЂР°С‡РёРІР°С‚СЊ СЂРµР·СѓР»СЊС‚Р°С‚С‹ РІ РЅР°С€Рё РёРЅС‚РµСЂС„РµР№СЃС‹ (Rows, Row, CommandTag)
+//  2. РЎРєСЂС‹РІР°С‚СЊ Р·Р°РІРёСЃРёРјРѕСЃС‚СЊ РѕС‚ pgx РѕС‚ СЃР»РѕСЏ СЂРµРїРѕР·РёС‚РѕСЂРёРµРІ
+type Pool struct {
+	*pgxpool.Pool
+	opTimeout time.Duration
+}
+
+// NewPool СЃРѕР·РґР°С‘С‚ Рё РїСЂРѕРІРµСЂСЏРµС‚ РїСѓР» СЃРѕРµРґРёРЅРµРЅРёР№ СЃ PostgreSQL.
+// Ping() РїСЂРё РёРЅРёС†РёР°Р»РёР·Р°С†РёРё РіР°СЂР°РЅС‚РёСЂСѓРµС‚, С‡С‚Рѕ Р‘Р” РґРѕСЃС‚СѓРїРЅР° РґРѕ РЅР°С‡Р°Р»Р° СЂР°Р±РѕС‚С‹ СЃРµСЂРІРµСЂР°.
+func NewPool(
+	ctx context.Context,
+	config Config,
+) (*Pool, error) {
+	connectionString := fmt.Sprintf(
+		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		config.User,
+		config.Password,
+		config.Host,
+		config.Port,
+		config.Database,
+	)
+
+	pgxconfig, err := pgxpool.ParseConfig(connectionString)
+	if err != nil {
+		return nil, fmt.Errorf("parse pgxconfig: %w", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, pgxconfig)
+	if err != nil {
+		return nil, fmt.Errorf("create pgxpool: %w", err)
+	}
+
+	// РџСЂРѕРІРµСЂСЏРµРј РґРѕСЃС‚СѓРїРЅРѕСЃС‚СЊ Р‘Р” СЃСЂР°Р·Сѓ РїСЂРё СЃС‚Р°СЂС‚Рµ.
+	if err := pool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("pgxpool ping: %w", err)
+	}
+
+	return &Pool{
+		Pool:      pool,
+		opTimeout: config.Timeout,
+	}, nil
+}
+
+// Query РІС‹РїРѕР»РЅСЏРµС‚ SELECT-Р·Р°РїСЂРѕСЃ Рё РІРѕР·РІСЂР°С‰Р°РµС‚ РёРЅС‚РµСЂС„РµР№СЃ Rows.
+// РћР±РѕСЂР°С‡РёРІР°РµС‚ pgx.Rows РІ pgxRows РґР»СЏ СЃРѕРѕС‚РІРµС‚СЃС‚РІРёСЏ РёРЅС‚РµСЂС„РµР№СЃСѓ РїСѓР»Р°.
+func (p *Pool) Query(
+	ctx context.Context,
+	sql string,
+	args ...any,
+) (core_postgres_pool.Rows, error) {
+	rows, err := p.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return pgxRows{rows}, nil
+}
+
+// QueryRow РІС‹РїРѕР»РЅСЏРµС‚ Р·Р°РїСЂРѕСЃ, РІРѕР·РІСЂР°С‰Р°СЋС‰РёР№ РѕРґРЅСѓ СЃС‚СЂРѕРєСѓ.
+// РћР±РѕСЂР°С‡РёРІР°РµС‚ pgx.Row РІ pgxRow (СЃ РјР°РїРїРёРЅРіРѕРј РѕС€РёР±РѕРє).
+func (p *Pool) QueryRow(
+	ctx context.Context,
+	sql string,
+	args ...any,
+) core_postgres_pool.Row {
+	row := p.Pool.QueryRow(ctx, sql, args...)
+
+	return pgxRow{row}
+}
+
+// Exec РІС‹РїРѕР»РЅСЏРµС‚ DML-Р·Р°РїСЂРѕСЃ (INSERT, UPDATE, DELETE).
+// РћР±РѕСЂР°С‡РёРІР°РµС‚ pgconn.CommandTag РІ pgxCommandTag.
+func (p *Pool) Exec(
+	ctx context.Context,
+	sql string,
+	arguments ...any,
+) (core_postgres_pool.CommandTag, error) {
+	tag, err := p.Pool.Exec(ctx, sql, arguments...)
+	if err != nil {
+		return nil, err
+	}
+
+	return pgxCommandTag{tag}, nil
+}
+
+// OpTimeout РІРѕР·РІСЂР°С‰Р°РµС‚ РјР°РєСЃРёРјР°Р»СЊРЅРѕРµ РІСЂРµРјСЏ РІС‹РїРѕР»РЅРµРЅРёСЏ РѕРґРЅРѕРіРѕ Р·Р°РїСЂРѕСЃР°.
+func (p *Pool) OpTimeout() time.Duration {
+	return p.opTimeout
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\postgres\pool\pool.go ===
+package pool
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\repository\postgres\pool\pgx\pool.go ===
+package pgx
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\middleware\common.go ===
+package core_http_middleware
+
+import (
+	"net/http"
+	"time"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+)
+
+const (
+	// requestIDHeader вЂ” Р·Р°РіРѕР»РѕРІРѕРє РґР»СЏ РїРµСЂРµРґР°С‡Рё СѓРЅРёРєР°Р»СЊРЅРѕРіРѕ РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂР° Р·Р°РїСЂРѕСЃР°.
+	// РџРѕР·РІРѕР»СЏРµС‚ РѕС‚СЃР»РµР¶РёРІР°С‚СЊ РѕРґРёРЅ Р·Р°РїСЂРѕСЃ С‡РµСЂРµР· РІСЃРµ Р»РѕРіРё Рё СЃРёСЃС‚РµРјС‹.
+	requestIDHeader = "X-Request-ID"
+)
+
+// CORS вЂ” middleware РґР»СЏ РѕР±СЂР°Р±РѕС‚РєРё Cross-Origin Resource Sharing.
+// Р”РѕР±Р°РІР»СЏРµС‚ Р·Р°РіРѕР»РѕРІРєРё Access-Control-Allow-* С‚РѕР»СЊРєРѕ РґР»СЏ СЂР°Р·СЂРµС€С‘РЅРЅС‹С… origins.
+//
+// РСЃРїРѕР»СЊР·СѓРµРј map РґР»СЏ O(1) РїРѕРёСЃРєР° РІРјРµСЃС‚Рѕ O(n) РїРµСЂРµР±РѕСЂР° СЃРїРёСЃРєР°.
+// Preflight-Р·Р°РїСЂРѕСЃС‹ (OPTIONS) РѕР±СЂР°Р±Р°С‚С‹РІР°СЋС‚СЃСЏ СЃСЂР°Р·Сѓ Р±РµР· РїРµСЂРµРґР°С‡Рё РґР°Р»СЊС€Рµ.
+func CORS(allowedOriginsList []string) Middleware {
+	allowedOrigins := make(map[string]struct{})
+	for _, origin := range allowedOriginsList {
+		allowedOrigins[origin] = struct{}{}
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+
+			if _, ok := allowedOrigins[origin]; ok {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			}
+
+			// Preflight OPTIONS вЂ” Р±СЂР°СѓР·РµСЂ РїСЂРѕРІРµСЂСЏРµС‚ СЂР°Р·СЂРµС€РµРЅРёРµ CORS РїРµСЂРµРґ РѕСЃРЅРѕРІРЅС‹Рј Р·Р°РїСЂРѕСЃРѕРј.
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequestID вЂ” middleware, РѕР±РµСЃРїРµС‡РёРІР°СЋС‰РёР№ РєР°Р¶РґС‹Р№ Р·Р°РїСЂРѕСЃ СѓРЅРёРєР°Р»СЊРЅС‹Рј РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂРѕРј.
+// Р•СЃР»Рё РєР»РёРµРЅС‚ РїРµСЂРµРґР°С‘С‚ X-Request-ID вЂ” РёСЃРїРѕР»СЊР·СѓРµРј РµРіРѕ (РїРѕР»РµР·РЅРѕ РґР»СЏ СЂР°СЃРїСЂРµРґРµР»С‘РЅРЅРѕР№ С‚СЂР°СЃСЃРёСЂРѕРІРєРё).
+// РРЅР°С‡Рµ РіРµРЅРµСЂРёСЂСѓРµРј РЅРѕРІС‹Р№ X-Request-ID.
+// РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ РґРѕР±Р°РІР»СЏРµС‚СЃСЏ Рё РІ Р·Р°РіРѕР»РѕРІРѕРє РѕС‚РІРµС‚Р°, С‡С‚РѕР±С‹ РєР»РёРµРЅС‚ РјРѕРі РµРіРѕ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ.
+func RequestID() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestID := r.Header.Get(requestIDHeader)
+			if requestID == "" {
+				requestID = uuid.NewString()
+			}
+
+			r.Header.Set(requestIDHeader, requestID)
+			w.Header().Set(requestIDHeader, requestID)
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// Logger вЂ” middleware, РєР»Р°РґСѓС‰РёР№ Р»РѕРіРіРµСЂ РІ РєРѕРЅС‚РµРєСЃС‚ Р·Р°РїСЂРѕСЃР°.
+// РћР±РѕРіР°С‰Р°РµС‚ Р»РѕРіРіРµСЂ РїРѕР»СЏРјРё request_id Рё url, С‡С‚РѕР±С‹ РІСЃРµ РїРѕСЃР»РµРґСѓСЋС‰РёРµ
+// РѕР±СЂР°Р±РѕС‚С‡РёРєРё Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё Р»РѕРіРёСЂРѕРІР°Р»Рё СЌС‚Рё РїРѕР»СЏ.
+//
+// Р’Р°Р¶РЅРѕ: СЌС‚РѕС‚ middleware РґРѕР»Р¶РµРЅ РёРґС‚Рё РџРћРЎР›Р• RequestID, С‡С‚РѕР±С‹ request_id СѓР¶Рµ Р±С‹Р» РґРѕСЃС‚СѓРїРµРЅ.
+func Logger(log *core_logger.Logger) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestID := r.Header.Get(requestIDHeader)
+
+			// РЎРѕР·РґР°С‘Рј РґРѕС‡РµСЂРЅРёР№ Р»РѕРіРіРµСЂ СЃ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹РјРё РїРѕР»СЏРјРё.
+			l := log.With(
+				zap.String("request_id", requestID),
+				zap.String("url", r.URL.String()),
+			)
+
+			ctx := core_logger.ToContext(r.Context(), l)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// Trace вЂ” middleware РґР»СЏ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ РІС…РѕРґСЏС‰РёС… Р·Р°РїСЂРѕСЃРѕРІ Рё РІСЂРµРјРµРЅРё РёС… РѕР±СЂР°Р±РѕС‚РєРё.
+// РСЃРїРѕР»СЊР·СѓРµС‚ ResponseWriter-РѕР±С‘СЂС‚РєСѓ, С‡С‚РѕР±С‹ РїРµСЂРµС…РІР°С‚РёС‚СЊ СЃС‚Р°С‚СѓСЃ-РєРѕРґ РѕС‚РІРµС‚Р°,
+// РєРѕС‚РѕСЂС‹Р№ РёРЅР°С‡Рµ РЅРµРґРѕСЃС‚СѓРїРµРЅ РїРѕСЃР»Рµ РІС‹Р·РѕРІР° WriteHeader.
+func Trace() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			log := core_logger.FromContext(ctx)
+			// РћР±РѕСЂР°С‡РёРІР°РµРј ResponseWriter, С‡С‚РѕР±С‹ РёРјРµС‚СЊ РІРѕР·РјРѕР¶РЅРѕСЃС‚СЊ РїСЂРѕС‡РёС‚Р°С‚СЊ СЃС‚Р°С‚СѓСЃ-РєРѕРґ.
+			rw := core_http_response.NewResponseWriter(w)
+
+			before := time.Now()
+			log.Debug(
+				">>> incoming HTTP request",
+				zap.String("http_method", r.Method),
+				zap.Time("time", before.UTC()),
+			)
+
+			next.ServeHTTP(rw, r)
+
+			log.Debug(
+				"<<< done HTTP request",
+				zap.Int("status_code", rw.GetStatusCode()),
+				zap.Duration("latency", time.Now().Sub(before)),
+			)
+		})
+	}
+}
+
+// Panic вЂ” middleware РґР»СЏ РїРµСЂРµС…РІР°С‚Р° РїР°РЅРёРє Рё РІРѕР·РІСЂР°С‚Р° HTTP 500.
+// Р‘РµР· СЌС‚РѕРіРѕ middleware РїР°РЅРёРєР° РІ РѕР±СЂР°Р±РѕС‚С‡РёРєРµ СѓСЂРѕРЅРёР»Р° Р±С‹ РІСЃСЋ РіРѕСЂСѓС‚РёРЅСѓ,
+// Р° СЃС‚Р°РЅРґР°СЂС‚РЅР°СЏ Р±РёР±Р»РёРѕС‚РµРєР° Go РІРµСЂРЅСѓР»Р° Р±С‹ РїСѓСЃС‚РѕР№ РѕС‚РІРµС‚ РєР»РёРµРЅС‚Сѓ.
+//
+// РСЃРїРѕР»СЊР·СѓРµС‚ defer + recover вЂ” СЃС‚Р°РЅРґР°СЂС‚РЅС‹Р№ РїР°С‚С‚РµСЂРЅ РѕР±СЂР°Р±РѕС‚РєРё РїР°РЅРёРє РІ Go.
+func Panic() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			log := core_logger.FromContext(ctx)
+			responseHandler := core_http_response.NewHTTPResponseHandler(log, w)
+
+			defer func() {
+				if p := recover(); p != nil {
+					responseHandler.PanicResponse(
+						p,
+						"during handle HTTP request got unexpected panic",
+					)
+				}
+			}()
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\middleware\dummy.go ===
+package core_http_middleware
+
+import (
+	"fmt"
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+)
+
+// Dummy вЂ” СѓС‡РµР±РЅС‹Р№ middleware-Р·Р°РіР»СѓС€РєР° РґР»СЏ РґРµРјРѕРЅСЃС‚СЂР°С†РёРё РїСЂРёРЅС†РёРїР° СЂР°Р±РѕС‚С‹ middleware.
+// Р›РѕРіРёСЂСѓРµС‚ РІС…РѕРґ Рё РІС‹С…РѕРґ РёР· middleware СЃ РїРµСЂРµРґР°РЅРЅРѕР№ СЃС‚СЂРѕРєРѕР№ s.
+//
+// РџСЂРёРјРµСЂ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ: РґРѕР±Р°РІРёС‚СЊ РІ APIVersionRouter РґР»СЏ РѕС‚Р»Р°РґРєРё С†РµРїРѕС‡РєРё middleware.
+// РќРµ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РІ production-СЃР±РѕСЂРєРµ.
+func Dummy(s string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			log := core_logger.FromContext(ctx)
+
+			// Р­С‚РѕС‚ РєРѕРґ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ Р”Рћ РѕР±СЂР°Р±РѕС‚С‡РёРєР°
+			log.Debug(fmt.Sprintf("-> before: %s", s))
+
+			next.ServeHTTP(w, r)
+
+			// Р­С‚РѕС‚ РєРѕРґ РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ РџРћРЎР›Р• РѕР±СЂР°Р±РѕС‚С‡РёРєР° вЂ” РєР»Р°СЃСЃРёС‡РµСЃРєРёР№ РїР°С‚С‚РµСЂРЅ В«РІРѕРєСЂСѓРіВ» (around).
+			log.Debug(fmt.Sprintf("<- after: %s", s))
+		})
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\middleware\middleware.go ===
+package core_http_middleware
+
+import "net/http"
+
+type Middleware func(http.Handler) http.Handler
+
+func ChainMiddleware(
+	h http.Handler,
+	m ...Middleware,
+) http.Handler {
+	if len(m) == 0 {
+		return h
+	}
+
+	for i := len(m) - 1; i >= 0; i-- {
+		h = m[i](h)
+	}
+	return h
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\request\decode.go ===
+package request
+
+import (
+    "encoding/json"
+    "fmt"
+    "net/http"
+
+    "github.com/cunofou/golang_todoapp/internal/core/errors"
+    "github.com/go-playground/validator/v10"
+)
+
+var validate = validator.New()
+
+type Validatable interface {
+    Validate() error
+}
+
+func DecodeAndValidateRequest(r *http.Request, dest any) error {
+    if err := json.NewDecoder(r.Body).Decode(dest); err != nil {
+        return fmt.Errorf("decode json: %v: %w", err, errors.ErrInvalidArgument)
+    }
+
+    var err error
+    v, ok := dest.(Validatable)
+    if ok {
+        err = v.Validate()
+    } else {
+        err = validate.Struct(dest)
+    }
+
+    if err != nil {
+        return fmt.Errorf("request validation: %v: %w", err, errors.ErrInvalidArgument)
+    }
+
+    return nil
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\request\path_value.go ===
+package request
+
+import (
+    "fmt"
+    "net/http"
+    "strconv"
+    "strings"
+
+    "github.com/cunofou/golang_todoapp/internal/core/errors"
+    "github.com/google/uuid"
+)
+
+func GetUUIDPathValue(r *http.Request, key string) (uuid.UUID, error) {
+    value := GetPathValue(r, key)
+    if value == "" {
+        return uuid.Nil, fmt.Errorf("path parameter %s is empty: %w", key, errors.ErrInvalidArgument)
+    }
+
+    id, err := uuid.Parse(value)
+    if err != nil {
+        return uuid.Nil, fmt.Errorf("invalid UUID format for %s: %w", key, errors.ErrInvalidArgument)
+    }
+
+    return id, nil
+}
+
+func GetIntPathValue(r *http.Request, key string) (int, error) {
+    value := GetPathValue(r, key)
+    if value == "" {
+        return 0, fmt.Errorf("path parameter %s is empty: %w", key, errors.ErrInvalidArgument)
+    }
+
+    num, err := strconv.Atoi(value)
+    if err != nil {
+        return 0, fmt.Errorf("invalid integer format for %s: %w", key, errors.ErrInvalidArgument)
+    }
+
+    return num, nil
+}
+
+func GetPathValue(r *http.Request, key string) string {
+    // Р’ СЂРµР°Р»СЊРЅРѕРј РєРѕРґРµ РёСЃРїРѕР»СЊР·СѓР№С‚Рµ chi.URLParam РёР»Рё Р°РЅР°Р»РѕРіРё
+    // Р­С‚Рѕ Р·Р°РіР»СѓС€РєР°
+    return ""
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\request\query_params.go ===
+package request
+
+import (
+    "fmt"
+    "net/http"
+    "strconv"
+    "time"
+
+    "github.com/cunofou/golang_todoapp/internal/core/errors"
+    "github.com/google/uuid"
+)
+
+func GetUUIDQueryParam(r *http.Request, key string) (uuid.UUID, error) {
+    value := r.URL.Query().Get(key)
+    if value == "" {
+        return uuid.Nil, nil
+    }
+
+    id, err := uuid.Parse(value)
+    if err != nil {
+        return uuid.Nil, fmt.Errorf("invalid UUID format for query param %s: %w", key, errors.ErrInvalidArgument)
+    }
+
+    return id, nil
+}
+
+func GetIntQueryParam(r *http.Request, key string) (int, error) {
+    value := r.URL.Query().Get(key)
+    if value == "" {
+        return 0, nil
+    }
+
+    num, err := strconv.Atoi(value)
+    if err != nil {
+        return 0, fmt.Errorf("invalid integer format for query param %s: %w", key, errors.ErrInvalidArgument)
+    }
+
+    return num, nil
+}
+
+func GetDateQueryParam(r *http.Request, key string) (time.Time, error) {
+    value := r.URL.Query().Get(key)
+    if value == "" {
+        return time.Time{}, nil
+    }
+
+    t, err := time.Parse(time.RFC3339, value)
+    if err != nil {
+        return time.Time{}, fmt.Errorf("invalid date format for query param %s (expected RFC3339): %w", key, errors.ErrInvalidArgument)
+    }
+
+    return t, nil
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\response\errors.go ===
+package response
+
+type ErrorResponse struct {
+    Error   string `json:"error"   example:"full error text"`
+    Message string `json:"message" example:"short human-readable message"`
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\response\handler.go ===
+package response
+
+import (
+    "encoding/json"
+    "errors"
+    "fmt"
+    "net/http"
+
+    "github.com/cunofou/golang_todoapp/internal/core/domain"
+    "github.com/cunofou/golang_todoapp/internal/core/errors"
+    "github.com/cunofou/golang_todoapp/internal/core/logger"
+    "go.uber.org/zap"
+)
+
+type HTTPResponseHandler struct {
+    log *logger.Logger
+    rw  http.ResponseWriter
+}
+
+func NewHTTPResponseHandler(
+    log *logger.Logger,
+    rw http.ResponseWriter,
+) *HTTPResponseHandler {
+    return &HTTPResponseHandler{
+        log: log,
+        rw:  rw,
+    }
+}
+
+func (h *HTTPResponseHandler) JSONResponse(
+    responseBody any,
+    statusCode int,
+) {
+    h.rw.WriteHeader(statusCode)
+
+    if err := json.NewEncoder(h.rw).Encode(responseBody); err != nil {
+        h.log.Error("write HTTP response", zap.Error(err))
+    }
+}
+
+func (h *HTTPResponseHandler) NoContentResponse() {
+    h.rw.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPResponseHandler) HTMLResponse(htmlFile domain.File) {
+    h.rw.WriteHeader(http.StatusOK)
+
+    h.rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+    if _, err := h.rw.Write(htmlFile.Buffer()); err != nil {
+        h.log.Error("write HTML HTTP response", zap.Error(err))
+    }
+}
+
+func (h *HTTPResponseHandler) ErrorResponse(err error, msg string) {
+    var (
+        statusCode int
+        logFunc    func(string, ...zap.Field)
+    )
+
+    switch {
+    case errors.Is(err, errors.ErrInvalidArgument):
+        statusCode = http.StatusBadRequest
+        logFunc = h.log.Warn
+
+    case errors.Is(err, errors.ErrNotFound):
+        statusCode = http.StatusNotFound
+        logFunc = h.log.Debug
+
+    case errors.Is(err, errors.ErrConflict):
+        statusCode = http.StatusConflict
+        logFunc = h.log.Warn
+
+    default:
+        statusCode = http.StatusInternalServerError
+        logFunc = h.log.Error
+    }
+
+    logFunc(msg, zap.Error(err))
+
+    h.errorResponse(
+        statusCode,
+        err,
+        msg,
+    )
+}
+
+func (h *HTTPResponseHandler) PanicResponse(p any, msg string) {
+    statusCode := http.StatusInternalServerError
+    err := fmt.Errorf("unexpected panic: %v", p)
+
+    h.log.Error(msg, zap.Error(err))
+
+    h.errorResponse(
+        statusCode,
+        err,
+        msg,
+    )
+}
+
+func (h *HTTPResponseHandler) errorResponse(
+    statusCode int,
+    err error,
+    msg string,
+) {
+    response := ErrorResponse{
+        Error:   err.Error(),
+        Message: msg,
+    }
+
+    h.JSONResponse(
+        response,
+        statusCode,
+    )
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\response\writer.go ===
+package response
+
+import "net/http"
+
+type ResponseWriter struct {
+    http.ResponseWriter
+    StatusCode int
+}
+
+func NewResponseWriter(w http.ResponseWriter) *ResponseWriter {
+    return &ResponseWriter{
+        ResponseWriter: w,
+        StatusCode:     200,
+    }
+}
+
+func (rw *ResponseWriter) WriteHeader(statusCode int) {
+    rw.StatusCode = statusCode
+    rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\server\config.go ===
+// Package core_http_server СЃРѕРґРµСЂР¶РёС‚ HTTP-СЃРµСЂРІРµСЂ, СЃРёСЃС‚РµРјСѓ РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРё
+// Рё РїРѕРґРґРµСЂР¶РєСѓ РІРµСЂСЃРёРѕРЅРёСЂРѕРІР°РЅРёСЏ API.
+package core_http_server
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/kelseyhightower/envconfig"
+)
+
+// Config вЂ” РєРѕРЅС„РёРіСѓСЂР°С†РёСЏ HTTP-СЃРµСЂРІРµСЂР°.
+// РџРµСЂРµРјРµРЅРЅС‹Рµ РѕРєСЂСѓР¶РµРЅРёСЏ СЃ РїСЂРµС„РёРєСЃРѕРј "HTTP_": HTTP_ADDR, HTTP_SHUTDOWN_TIMEOUT, HTTP_ALLOWED_ORIGINS.
+type Config struct {
+	// Addr вЂ” Р°РґСЂРµСЃ Рё РїРѕСЂС‚ СЃРµСЂРІРµСЂР°, РЅР°РїСЂРёРјРµСЂ ":5050" (СЃР»СѓС€Р°С‚СЊ РЅР° РІСЃРµС… РёРЅС‚РµСЂС„РµР№СЃР°С…).
+	Addr string `envconfig:"ADDR" required:"true"`
+
+	// ShutdownTimeout вЂ” РІСЂРµРјСЏ РѕР¶РёРґР°РЅРёСЏ Р·Р°РІРµСЂС€РµРЅРёСЏ Р°РєС‚РёРІРЅС‹С… Р·Р°РїСЂРѕСЃРѕРІ РїСЂРё РѕСЃС‚Р°РЅРѕРІРєРµ СЃРµСЂРІРµСЂР°.
+	// РџРѕ РёСЃС‚РµС‡РµРЅРёРё СЌС‚РѕРіРѕ РІСЂРµРјРµРЅРё СЃРµСЂРІРµСЂ РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ Р·Р°РєСЂС‹РІР°РµС‚ СЃРѕРµРґРёРЅРµРЅРёСЏ.
+	ShutdownTimeout time.Duration `envconfig:"SHUTDOWN_TIMEOUT" default:"30s"`
+
+	// AllowedOrigins вЂ” СЃРїРёСЃРѕРє СЂР°Р·СЂРµС€С‘РЅРЅС‹С… origins РґР»СЏ CORS.
+	// envconfig РїР°СЂСЃРёС‚ СЃС‚СЂРѕРєСѓ СЃ Р·Р°РїСЏС‚РѕР№ РєР°Рє СЃР»Р°Р№СЃ: "http://a.com,http://b.com".
+	AllowedOrigins []string `envconfig:"ALLOWED_ORIGINS" required:"true"`
+}
+
+// NewConfig С‡РёС‚Р°РµС‚ РєРѕРЅС„РёРіСѓСЂР°С†РёСЋ СЃРµСЂРІРµСЂР° РёР· РїРµСЂРµРјРµРЅРЅС‹С… РѕРєСЂСѓР¶РµРЅРёСЏ.
+func NewConfig() (Config, error) {
+	var config Config
+
+	if err := envconfig.Process("HTTP", &config); err != nil {
+		return Config{}, fmt.Errorf("process envconfig: %w", err)
+	}
+
+	return config, nil
+}
+
+// NewConfigMust вЂ” В«MustВ»-РІР°СЂРёР°РЅС‚ РєРѕРЅСЃС‚СЂСѓРєС‚РѕСЂР°: РїР°РЅРёРєСѓРµС‚ РїСЂРё РѕС€РёР±РєРµ.
+func NewConfigMust() Config {
+	config, err := NewConfig()
+	if err != nil {
+		err = fmt.Errorf("get HTTP server config: %w", err)
+		panic(err)
+	}
+
+	return config
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\server\route.go ===
+package core_http_server
+
+import (
+	"net/http"
+
+	core_http_middleware "github.com/cunofou/golang_todoapp/internal/core/transport/http/middleware"
+)
+
+// Route РѕРїРёСЃС‹РІР°РµС‚ РѕРґРёРЅ HTTP-РјР°СЂС€СЂСѓС‚: РјРµС‚РѕРґ, РїСѓС‚СЊ, РѕР±СЂР°Р±РѕС‚С‡РёРє Рё middleware.
+// Middleware РІ Route РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ С‚РѕР»СЊРєРѕ Рє СЌС‚РѕРјСѓ РєРѕРЅРєСЂРµС‚РЅРѕРјСѓ РјР°СЂС€СЂСѓС‚Сѓ,
+// РІ РѕС‚Р»РёС‡РёРµ РѕС‚ middleware СЃРµСЂРІРµСЂР° (РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ РєРѕ РІСЃРµРј РјР°СЂС€СЂСѓС‚Р°Рј).
+type Route struct {
+	Method     string
+	Path       string
+	Handler    http.HandlerFunc
+	Middleware []core_http_middleware.Middleware
+}
+
+// WithMiddleware РїСЂРёРјРµРЅСЏРµС‚ middleware РјР°СЂС€СЂСѓС‚Р° Рє РѕР±СЂР°Р±РѕС‚С‡РёРєСѓ Рё РІРѕР·РІСЂР°С‰Р°РµС‚ РіРѕС‚РѕРІС‹Р№ http.Handler.
+func (r *Route) WithMiddleware() http.Handler {
+	return core_http_middleware.ChainMiddleware(
+		r.Handler,
+		r.Middleware...,
+	)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\server\router.go ===
+package core_http_server
+
+import (
+	"net/http"
+
+	core_http_middleware "github.com/cunofou/golang_todoapp/internal/core/transport/http/middleware"
+)
+
+// APIVersion вЂ” С‚РёРї РґР»СЏ РёРґРµРЅС‚РёС„РёРєР°С‚РѕСЂР° РІРµСЂСЃРёРё API.
+// РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ РѕС‚РґРµР»СЊРЅРѕРіРѕ С‚РёРїР° (РЅРµ string) РґРµР»Р°РµС‚ РєРѕРґ СЏРІРЅС‹Рј Рё Р·Р°С‰РёС‰Р°РµС‚ РѕС‚ РѕРїРµС‡Р°С‚РѕРє.
+type APIVersion string
+
+var (
+	ApiVersion1 = APIVersion("v1")
+	ApiVersion2 = APIVersion("v2")
+	ApiVersion3 = APIVersion("v3")
+)
+
+// APIVersionRouter РіСЂСѓРїРїРёСЂСѓРµС‚ РјР°СЂС€СЂСѓС‚С‹ РїРѕРґ РµРґРёРЅС‹Рј РІРµСЂСЃРёРѕРЅРЅС‹Рј РїСЂРµС„РёРєСЃРѕРј /api/v1, /api/v2 Рё С‚.Рґ.
+// РџРѕРґРґРµСЂР¶РёРІР°РµС‚ СЃРѕР±СЃС‚РІРµРЅРЅС‹Рµ middleware, РїСЂРёРјРµРЅСЏРµРјС‹Рµ С‚РѕР»СЊРєРѕ Рє РјР°СЂС€СЂСѓС‚Р°Рј (Route) СЌС‚РѕР№ РІРµСЂСЃРёРё API.
+// Р­С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚, РЅР°РїСЂРёРјРµСЂ, РґРѕР±Р°РІРёС‚СЊ Р°СѓС‚РµРЅС‚РёС„РёРєР°С†РёСЋ С‚РѕР»СЊРєРѕ РґР»СЏ /api/v2, РЅРµ С‚СЂРѕРіР°СЏ /api/v1.
+type APIVersionRouter struct {
+	*http.ServeMux
+	apiVersion APIVersion
+	routes     []Route
+	middleware []core_http_middleware.Middleware
+}
+
+// NewAPIVersionRouter СЃРѕР·РґР°С‘С‚ СЂРѕСѓС‚РµСЂ РґР»СЏ Р·Р°РґР°РЅРЅРѕР№ РІРµСЂСЃРёРё API.
+// РќРµРѕР±СЏР·Р°С‚РµР»СЊРЅС‹Рµ middleware Р±СѓРґСѓС‚ РїСЂРёРјРµРЅСЏС‚СЊСЃСЏ РєРѕ РІСЃРµРј РјР°СЂС€СЂСѓС‚Р°Рј СЌС‚РѕР№ РІРµСЂСЃРёРё.
+func NewAPIVersionRouter(
+	apiVersion APIVersion,
+	middleware ...core_http_middleware.Middleware,
+) *APIVersionRouter {
+	return &APIVersionRouter{
+		ServeMux:   http.NewServeMux(),
+		apiVersion: apiVersion,
+		middleware: middleware,
+	}
+}
+
+// AddRoutes РґРѕР±Р°РІР»СЏРµС‚ РјР°СЂС€СЂСѓС‚С‹ РІ СЂРѕСѓС‚РµСЂ.
+func (r *APIVersionRouter) AddRoutes(routes ...Route) {
+	r.routes = append(r.routes, routes...)
+}
+
+// Handlers С„РѕСЂРјРёСЂСѓРµС‚ РјР°РїСѓ В«РїР°С‚С‚РµСЂРЅ РјР°СЂС€СЂСѓС‚Р° в†’ РѕР±СЂР°Р±РѕС‚С‡РёРєВ» РґР»СЏ СЂРµРіРёСЃС‚СЂР°С†РёРё РІ http.ServeMux.
+// РџР°С‚С‚РµСЂРЅ СЃС‚СЂРѕРёС‚СЃСЏ РєР°Рє: "METHOD /api/v1/path".
+// Middleware СЂРѕСѓС‚РµСЂР° (APIVersionRouter) РѕР±РѕСЂР°С‡РёРІР°СЋС‚ middleware РјР°СЂС€СЂСѓС‚Р° (Route) СЃРЅР°СЂСѓР¶Рё.
+func (r *APIVersionRouter) Handlers() map[string]http.Handler {
+	handlers := make(map[string]http.Handler, len(r.routes))
+
+	for _, route := range r.routes {
+		// Р¤РѕСЂРјРёСЂСѓРµРј РїРѕР»РЅС‹Р№ РїР°С‚С‚РµСЂРЅ: "GET /api/v1/tasks", "POST /api/v1/users" Рё С‚.Рґ.
+		pattern := route.Method + " /api/" + string(r.apiVersion) + route.Path
+		handler := core_http_middleware.ChainMiddleware(
+			route.WithMiddleware(),
+			r.middleware...,
+		)
+
+		handlers[pattern] = handler
+	}
+
+	return handlers
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\server\server.go ===
+package core_http_server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	
+	httpSwagger "github.com/swaggo/http-swagger/v2"
+	"go.uber.org/zap"
+)
+
+// HTTPServer вЂ” РѕР±С‘СЂС‚РєР° РЅР°Рґ СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рј net/http, РґРѕР±Р°РІР»СЏСЋС‰Р°СЏ:
+//   - РџРѕРґРґРµСЂР¶РєСѓ РІРµСЂСЃРёРѕРЅРёСЂРѕРІР°РЅРёСЏ API С‡РµСЂРµР· APIVersionRouter
+//   - Р¦РµРїРѕС‡РєСѓ middleware РґР»СЏ РІСЃРµС… РјР°СЂС€СЂСѓС‚РѕРІ
+//   - Swagger UI
+//   - Graceful shutdown
+type HTTPServer struct {
+	mux    *http.ServeMux
+	config Config
+	log    *core_logger.Logger
+
+	// middleware РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ РєРѕ РІСЃРµРј РјР°СЂС€СЂСѓС‚Р°Рј СЃРµСЂРІРµСЂР° (РіР»РѕР±Р°Р»СЊРЅС‹Рµ middleware).
+	middleware []core_http_middleware.Middleware
+}
+
+// NewHTTPServer СЃРѕР·РґР°С‘С‚ HTTP-СЃРµСЂРІРµСЂ СЃ Р·Р°РґР°РЅРЅС‹РјРё РіР»РѕР±Р°Р»СЊРЅС‹РјРё middleware.
+func NewHTTPServer(
+	config Config,
+	log *core_logger.Logger,
+	middleware ...core_http_middleware.Middleware,
+) *HTTPServer {
+	return &HTTPServer{
+		mux:        http.NewServeMux(),
+		config:     config,
+		log:        log,
+		middleware: middleware,
+	}
+}
+
+// RegisterAPIRouters СЂРµРіРёСЃС‚СЂРёСЂСѓРµС‚ РІРµСЂСЃРёРѕРЅРёСЂРѕРІР°РЅРЅС‹Рµ СЂРѕСѓС‚РµСЂС‹ API РІ ServeMux.
+// РљР°Р¶РґС‹Р№ СЂРѕСѓС‚РµСЂ РґРѕР±Р°РІР»СЏРµС‚ РјР°СЂС€СЂСѓС‚С‹ РІРёРґР° "{METHOD} /api/v{N}/{path}".
+func (s *HTTPServer) RegisterAPIRouters(routers ...*APIVersionRouter) {
+	for _, router := range routers {
+		handlers := router.Handlers()
+
+		for path, handler := range handlers {
+			s.mux.Handle(path, handler)
+		}
+	}
+}
+
+// RegisterRoutes СЂРµРіРёСЃС‚СЂРёСЂСѓРµС‚ РјР°СЂС€СЂСѓС‚С‹ Р±РµР· РІРµСЂСЃРёРѕРЅРЅРѕРіРѕ РїСЂРµС„РёРєСЃР° (РЅР°РїСЂРёРјРµСЂ, РіР»Р°РІРЅР°СЏ СЃС‚СЂР°РЅРёС†Р° "/").
+func (s *HTTPServer) RegisterRoutes(routes ...Route) {
+	for _, route := range routes {
+		path := route.Method + " " + route.Path
+		handler := route.WithMiddleware()
+
+		s.mux.Handle(path, handler)
+	}
+}
+
+// RegisterSwagger СЂРµРіРёСЃС‚СЂРёСЂСѓРµС‚ РґРІР° РјР°СЂС€СЂСѓС‚Р°:
+//   - GET /swagger/      вЂ” Swagger UI (РёРЅС‚РµСЂР°РєС‚РёРІРЅР°СЏ РґРѕРєСѓРјРµРЅС‚Р°С†РёСЏ)
+//   - GET /swagger/doc.json вЂ” СЃРїРµС†РёС„РёРєР°С†РёСЏ OpenAPI РІ С„РѕСЂРјР°С‚Рµ JSON
+func (s *HTTPServer) RegisterSwagger() {
+	s.mux.Handle(
+		"GET /swagger/",
+		httpSwagger.Handler(
+			httpSwagger.URL("/swagger/doc.json"),
+			httpSwagger.DefaultModelsExpandDepth(-1),
+		),
+	)
+
+	s.mux.HandleFunc(
+		"GET /swagger/doc.json",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(docs.SwaggerInfo.ReadDoc()))
+		},
+	)
+}
+
+// Run Р·Р°РїСѓСЃРєР°РµС‚ HTTP-СЃРµСЂРІРµСЂ Рё Р±Р»РѕРєРёСЂСѓРµС‚ РІС‹РїРѕР»РЅРµРЅРёРµ РґРѕ РїРѕР»СѓС‡РµРЅРёСЏ СЃРёРіРЅР°Р»Р° Р·Р°РІРµСЂС€РµРЅРёСЏ.
+//
+// Graceful shutdown:
+//  1. РџСЂРё РѕС‚РјРµРЅРµ ctx (SIGINT/SIGTERM) РІС‹Р·С‹РІР°РµС‚СЃСЏ server.Shutdown()
+//  2. Shutdown Р¶РґС‘С‚ Р·Р°РІРµСЂС€РµРЅРёСЏ Р°РєС‚РёРІРЅС‹С… HTTP РѕР±СЂР°Р±РѕС‚С‡РёРєРѕРІ РґРѕ ShutdownTimeout
+//  3. РџРѕ РёСЃС‚РµС‡РµРЅРёРё С‚Р°Р№РјР°СѓС‚Р° РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ Р·Р°РєСЂС‹РІР°РµС‚ СЃРѕРµРґРёРЅРµРЅРёСЏ С‡РµСЂРµР· server.Close()
+//
+// РљР°РЅР°Р» ch РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ РґР»СЏ РїРµСЂРµРґР°С‡Рё РѕС€РёР±РєРё РёР· РіРѕСЂСѓС‚РёРЅС‹ РІ РѕСЃРЅРѕРІРЅРѕР№ РїРѕС‚РѕРє.
+func (s *HTTPServer) Run(ctx context.Context) error {
+	// РџСЂРёРјРµРЅСЏРµРј РіР»РѕР±Р°Р»СЊРЅС‹Рµ middleware Рє ServeMux.
+	mux := core_http_middleware.ChainMiddleware(s.mux, s.middleware...)
+
+	server := &http.Server{
+		Addr:    s.config.Addr,
+		Handler: mux,
+	}
+
+	// Р‘СѓС„РµСЂРёР·РёСЂРѕРІР°РЅРЅС‹Р№ РєР°РЅР°Р» (СЂР°Р·РјРµСЂ 1), С‡С‚РѕР±С‹ РіРѕСЂСѓС‚РёРЅР° РЅРµ Р·Р°Р±Р»РѕРєРёСЂРѕРІР°Р»Р°СЃСЊ
+	// РїСЂРё РѕС‚РїСЂР°РІРєРµ РѕС€РёР±РєРё, РµСЃР»Рё РѕСЃРЅРѕРІРЅРѕР№ РїРѕС‚РѕРє СѓР¶Рµ СѓС€С‘Р» РІ select.
+	ch := make(chan error, 1)
+
+	go func() {
+		defer close(ch)
+
+		s.log.Warn("start HTTP server", zap.String("addr", s.config.Addr))
+
+		err := server.ListenAndServe()
+
+		// http.ErrServerClosed вЂ” РЅРѕСЂРјР°Р»СЊРЅРѕРµ Р·Р°РІРµСЂС€РµРЅРёРµ РїРѕСЃР»Рµ Shutdown(), РЅРµ РѕС€РёР±РєР°.
+		if !errors.Is(err, http.ErrServerClosed) {
+			ch <- err
+		}
+	}()
+
+	select {
+	case err := <-ch:
+		// HTTP СЃРµСЂРІРµСЂ Р·Р°РІРµСЂС€РёР»СЃСЏ РёР·-Р·Р° РѕС€РёР±РєРё (РЅР°РїСЂРёРјРµСЂ, РїРѕСЂС‚ Р·Р°РЅСЏС‚).
+		if err != nil {
+			return fmt.Errorf("listen and server HTTP: %w", err)
+		}
+	case <-ctx.Done():
+		// РџРѕР»СѓС‡РµРЅ СЃРёРіРЅР°Р» Р·Р°РІРµСЂС€РµРЅРёСЏ вЂ” РІС‹РїРѕР»РЅСЏРµРј graceful shutdown.
+		s.log.Warn("shutdown HTTP server...")
+
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			s.config.ShutdownTimeout,
+		)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			// Р•СЃР»Рё graceful shutdown РЅРµ СѓСЃРїРµР» вЂ” РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ Р·Р°РєСЂС‹РІР°РµРј.
+			_ = server.Close()
+
+			return fmt.Errorf("shutdown HTTP server: %w", err)
+		}
+
+		s.log.Warn("HTTP server stopped")
+	}
+
+	return nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\core\transport\http\types\types.go ===
+package types
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\repository\postgres\get_tasks.go ===
+package postgres
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// GetTasks РІРѕР·РІСЂР°С‰Р°РµС‚ Р·Р°РґР°С‡Рё СЃ РґРёРЅР°РјРёС‡РµСЃРєРѕР№ С„РёР»СЊС‚СЂР°С†РёРµР№ РґР»СЏ СЂР°СЃС‡С‘С‚Р° СЃС‚Р°С‚РёСЃС‚РёРєРё.
+//
+// Р’ РѕС‚Р»РёС‡РёРµ РѕС‚ tasks-СЂРµРїРѕР·РёС‚РѕСЂРёСЏ, Р·РґРµСЃСЊ РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ strings.Builder РґР»СЏ РїРѕСЃС‚СЂРѕРµРЅРёСЏ
+// WHERE-СѓСЃР»РѕРІРёСЏ СЃ РїСЂРѕРёР·РІРѕР»СЊРЅС‹Рј С‡РёСЃР»РѕРј С„РёР»СЊС‚СЂРѕРІ (userID, from, to).
+// РџР°СЂР°РјРµС‚СЂС‹ РґРѕР±Р°РІР»СЏСЋС‚СЃСЏ РІ args РґРёРЅР°РјРёС‡РµСЃРєРё: $1, $2, ... вЂ” СЌС‚Рѕ Р·Р°С‰РёС‰Р°РµС‚ РѕС‚ SQL-РёРЅСЉРµРєС†РёР№.
+func (r *StatisticsRepository) GetTasks(
+	ctx context.Context,
+	userID *uuid.UUID,
+	from *time.Time,
+	to *time.Time,
+) ([]domain.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	var queryBuilder strings.Builder
+
+	queryBuilder.WriteString(`
+	SELECT id, version, title, description, completed, created_at, completed_at, author_user_id
+	FROM todoapp.tasks
+	`)
+
+	args := []any{}
+	conditions := []string{}
+
+	if userID != nil {
+		conditions = append(conditions, fmt.Sprintf("author_user_id=$%d", len(args)+1))
+		args = append(args, userID)
+	}
+
+	if from != nil {
+		conditions = append(conditions, fmt.Sprintf("created_at>=$%d", len(args)+1))
+		args = append(args, from)
+	}
+
+	if to != nil {
+		conditions = append(conditions, fmt.Sprintf("created_at<$%d", len(args)+1))
+		args = append(args, to)
+	}
+
+	if len(conditions) > 0 {
+		queryBuilder.WriteString(" WHERE " + strings.Join(conditions, " AND "))
+	}
+
+	queryBuilder.WriteString(" ORDER BY id ASC")
+
+	rows, err := r.pool.Query(ctx, queryBuilder.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("select tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var taskModels []TaskModel
+
+	for rows.Next() {
+		var taskModel TaskModel
+		if err := taskModel.Scan(rows); err != nil {
+			return nil, fmt.Errorf("scan tasks: %w", err)
+		}
+
+		taskModels = append(taskModels, taskModel)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("next rows: %w", err)
+	}
+
+	taskDomains := modelsToDomains(taskModels)
+
+	return taskDomains, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\repository\postgres\models.go ===
+package postgres
+
+import (
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository"
+	"github.com/google/uuid"
+)
+
+package postgres
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+)
+
+// TaskModel вЂ” РјРѕРґРµР»СЊ Р·Р°РґР°С‡Рё РґР»СЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ СЃС‚Р°С‚РёСЃС‚РёРєРё.
+// РРґРµРЅС‚РёС‡РµРЅ TaskModel РёР· tasks/repository, РЅРѕ РґСѓР±Р»РёСЂСѓРµС‚СЃСЏ РЅР°РјРµСЂРµРЅРЅРѕ:
+// РїР°РєРµС‚С‹ РЅРµР·Р°РІРёСЃРёРјС‹, Рё СЃРІСЏР·С‹РІР°С‚СЊ РёС… С‡РµСЂРµР· РѕР±С‰СѓСЋ СЃС‚СЂСѓРєС‚СѓСЂСѓ СЃРѕР·РґР°Р»Рѕ Р±С‹ Р»РёС€РЅСЋСЋ Р·Р°РІРёСЃРёРјРѕСЃС‚СЊ.
+type TaskModel struct {
+	ID           uuid.UUID
+	Version      int
+	Title        string
+	Description  *string
+	Completed    bool
+	CreatedAt    time.Time
+	CompletedAt  *time.Time
+	AuthorUserID uuid.UUID
+}
+
+// Scan Р·Р°РїРѕР»РЅСЏРµС‚ РїРѕР»СЏ РјРѕРґРµР»Рё РёР· СЂРµР·СѓР»СЊС‚Р°С‚Р° Р·Р°РїСЂРѕСЃР° Рє Р‘Р”.
+func (m *TaskModel) Scan(row core_postgres_pool.Row) error {
+	return row.Scan(
+		&m.ID,
+		&m.Version,
+		&m.Title,
+		&m.Description,
+		&m.Completed,
+		&m.CreatedAt,
+		&m.CompletedAt,
+		&m.AuthorUserID,
+	)
+}
+
+// modelToDomain РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ РјРѕРґРµР»СЊ Р‘Р” РІ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚ Task.
+func modelToDomain(taskModel TaskModel) domain.Task {
+	return domain.NewTask(
+		taskModel.ID,
+		taskModel.Version,
+		taskModel.Title,
+		taskModel.Description,
+		taskModel.Completed,
+		taskModel.CreatedAt,
+		taskModel.CompletedAt,
+		taskModel.AuthorUserID,
+	)
+}
+
+// modelsToDomains РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ СЃРїРёСЃРѕРє РјРѕРґРµР»РµР№ РІ СЃРїРёСЃРѕРє РґРѕРјРµРЅРЅС‹С… РѕР±СЉРµРєС‚РѕРІ.
+func modelsToDomains(taskModels []TaskModel) []domain.Task {
+	domains := make([]domain.Task, len(taskModels))
+
+	for i, model := range taskModels {
+		domains[i] = modelToDomain(model)
+	}
+
+	return domains
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\repository\postgres\repository.go ===
+// package postgres СЂРµР°Р»РёР·СѓРµС‚ РґРѕСЃС‚СѓРї Рє РґР°РЅРЅС‹Рј РґР»СЏ СЂР°СЃС‡С‘С‚Р° СЃС‚Р°С‚РёСЃС‚РёРєРё.
+// Р РµРїРѕР·РёС‚РѕСЂРёР№ С‡РёС‚Р°РµС‚ Р·Р°РґР°С‡Рё СЃ РѕРїС†РёРѕРЅР°Р»СЊРЅРѕР№ С„РёР»СЊС‚СЂР°С†РёРµР№ вЂ” РґРѕРјРµРЅРЅР°СЏ Р»РѕРіРёРєР° РїРѕРґСЃС‡С‘С‚Р°
+// СЃС‚Р°С‚РёСЃС‚РёРєРё РЅР°С…РѕРґРёС‚СЃСЏ РІ domain.CreateStatistics, РЅРµ Р·РґРµСЃСЊ.
+package postgres
+
+import core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+
+// StatisticsRepository вЂ” СЂРµРїРѕР·РёС‚РѕСЂРёР№ РґР»СЏ РїРѕР»СѓС‡РµРЅРёСЏ РґР°РЅРЅС‹С…, РЅРµРѕР±С…РѕРґРёРјС‹С… РґР»СЏ СЃС‚Р°С‚РёСЃС‚РёРєРё.
+type StatisticsRepository struct {
+	pool core_postgres_pool.Pool
+}
+
+// NewStatisticsRepository СЃРѕР·РґР°С‘С‚ СЂРµРїРѕР·РёС‚РѕСЂРёР№ СЃС‚Р°С‚РёСЃС‚РёРєРё СЃ РїРµСЂРµРґР°РЅРЅС‹Рј РїСѓР»РѕРј СЃРѕРµРґРёРЅРµРЅРёР№.
+func NewStatisticsRepository(
+	pool core_postgres_pool.Pool,
+) *StatisticsRepository {
+	return &StatisticsRepository{
+		pool: pool,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\service\get_statistics.go ===
+package statistics_service
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	"github.com/google/uuid"
+)
+
+// GetStatistics РІРѕР·РІСЂР°С‰Р°РµС‚ Р°РіСЂРµРіРёСЂРѕРІР°РЅРЅСѓСЋ СЃС‚Р°С‚РёСЃС‚РёРєСѓ РїРѕ Р·Р°РґР°С‡Р°Рј.
+//
+// РџР°СЂР°РјРµС‚СЂС‹ С„РёР»СЊС‚СЂР°С†РёРё (РІСЃРµ РѕРїС†РёРѕРЅР°Р»СЊРЅС‹):
+//   - userID вЂ” СЃС‡РёС‚Р°С‚СЊ СЃС‚Р°С‚РёСЃС‚РёРєСѓ С‚РѕР»СЊРєРѕ РґР»СЏ Р·Р°РґР°С‡ РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+//   - from   вЂ” РЅР°С‡Р°Р»Рѕ РІСЂРµРјРµРЅРЅРѕРіРѕ РґРёР°РїР°Р·РѕРЅР° (РІРєР»СЋС‡РёС‚РµР»СЊРЅРѕ)
+//   - to     вЂ” РєРѕРЅРµС† РІСЂРµРјРµРЅРЅРѕРіРѕ РґРёР°РїР°Р·РѕРЅР° (РЅРµ РІРєР»СЋС‡РёС‚РµР»СЊРЅРѕ)
+//
+// РџСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ to > from РґРѕ РѕР±СЂР°С‰РµРЅРёСЏ Рє Р‘Р” вЂ” Р±РµСЃСЃРјС‹СЃР»РµРЅРЅС‹Р№ РґРёР°РїР°Р·РѕРЅ
+// РЅРµРІРѕР·РјРѕР¶РЅРѕ РѕР±СЂР°Р±РѕС‚Р°С‚СЊ РєРѕСЂСЂРµРєС‚РЅРѕ.
+func (s *StatisticsService) GetStatistics(
+	ctx context.Context,
+	userID *uuid.UUID,
+	from *time.Time,
+	to *time.Time,
+) (domain.Statistics, error) {
+	if from != nil && to != nil {
+		if to.Before(*from) || to.Equal(*from) {
+			return domain.Statistics{}, fmt.Errorf(
+				"`to` must be after `from`: %w",
+				core_errors.ErrInvalidArgument,
+			)
+		}
+	}
+
+	tasks, err := s.statisticsRepository.GetTasks(ctx, userID, from, to)
+	if err != nil {
+		return domain.Statistics{}, fmt.Errorf("get tasks from repository: %w", err)
+	}
+
+	statistics := domain.CreateStatistics(tasks)
+
+	return statistics, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\service\service.go ===
+// Package statistics_service СЃРѕРґРµСЂР¶РёС‚ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєСѓ СЂР°СЃС‡С‘С‚Р° СЃС‚Р°С‚РёСЃС‚РёРєРё РїРѕ Р·Р°РґР°С‡Р°Рј.
+package statistics_service
+
+import (
+	"context"
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// StatisticsService вЂ” СЃРµСЂРІРёСЃ СЃС‚Р°С‚РёСЃС‚РёРєРё.
+// Р§РёС‚Р°РµС‚ Р·Р°РґР°С‡Рё РёР· СЂРµРїРѕР·РёС‚РѕСЂРёСЏ Рё РґРµР»РµРіРёСЂСѓРµС‚ РїРѕРґСЃС‡С‘С‚ РІ domain.CreateStatistics.
+type StatisticsService struct {
+	statisticsRepository StatisticsRepository
+}
+
+// StatisticsRepository вЂ” РёРЅС‚РµСЂС„РµР№СЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ РґР»СЏ СЃРµСЂРІРёСЃР° СЃС‚Р°С‚РёСЃС‚РёРєРё.
+// РЎРµСЂРІРёСЃ С‚СЂРµР±СѓРµС‚ С‚РѕР»СЊРєРѕ РјРµС‚РѕРґ РїРѕР»СѓС‡РµРЅРёСЏ Р·Р°РґР°С‡ вЂ” РѕСЃС‚Р°Р»СЊРЅС‹Рµ РѕРїРµСЂР°С†РёРё РµРјСѓ РЅРµ РЅСѓР¶РЅС‹.
+// Р­С‚Рѕ С…РѕСЂРѕС€РёР№ РїСЂРёРјРµСЂ РїСЂРёРЅС†РёРїР° Interface Segregation (ISP РёР· SOLID):
+// РёРЅС‚РµСЂС„РµР№СЃ СЃРѕРґРµСЂР¶РёС‚ С‚РѕР»СЊРєРѕ С‚Рѕ, С‡С‚Рѕ РґРµР№СЃС‚РІРёС‚РµР»СЊРЅРѕ РЅСѓР¶РЅРѕ РїРѕС‚СЂРµР±РёС‚РµР»СЋ.
+type StatisticsRepository interface {
+	GetTasks(
+		ctx context.Context,
+		userID *uuid.UUID,
+		from *time.Time,
+		to *time.Time,
+	) ([]domain.Task, error)
+}
+
+// NewStatisticsService СЃРѕР·РґР°С‘С‚ СЃРµСЂРІРёСЃ СЃС‚Р°С‚РёСЃС‚РёРєРё СЃ РІРЅРµРґСЂС‘РЅРЅС‹Рј СЂРµРїРѕР·РёС‚РѕСЂРёРµРј.
+func NewStatisticsService(
+	statisticsRepository StatisticsRepository,
+) *StatisticsService {
+	return &StatisticsService{
+		statisticsRepository: statisticsRepository,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\transport\http\get_statistics.go ===
+package statistics_transport_http
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	"github.com/google/uuid"
+)
+
+// GetStatisticsResponse вЂ” DTO СЃ Р°РіСЂРµРіРёСЂРѕРІР°РЅРЅРѕР№ СЃС‚Р°С‚РёСЃС‚РёРєРѕР№ Р·Р°РґР°С‡.
+// TasksAverageCompletionTime СЃРµСЂРёР°Р»РёР·СѓРµС‚СЃСЏ РєР°Рє СЃС‚СЂРѕРєР° (РЅР°РїСЂРёРјРµСЂ, "1m30s"),
+// С‚.Рє. time.Duration РЅРµ РёРјРµРµС‚ СЃС‚Р°РЅРґР°СЂС‚РЅРѕРіРѕ JSON-РїСЂРµРґСЃС‚Р°РІР»РµРЅРёСЏ.
+type GetStatisticsResponse struct {
+	TasksCreated               int      `json:"tasks_created"                 example:"50"`
+	TasksCompleted             int      `json:"tasks_completed"               example:"10"`
+	TasksCompletedRate         *float64 `json:"tasks_completed_rate"          example:"20"`
+	TasksAverageCompletionTime *string  `json:"tasks_average_completion_time" example:"1m30s"`
+}
+
+// GetStatistics godoc
+// @Summary      РџРѕР»СѓС‡РµРЅРёРµ СЃС‚Р°С‚РёСЃС‚РёРєРё
+// @Description  РџРѕР»СѓС‡РµРЅРёРµ СЃС‚Р°С‚РёСЃС‚РёРєРё РїРѕ Р·Р°РґР°С‡Р°Рј СЃ РѕРїС†РёРѕРЅР°Р»СЊРЅРѕР№ С„РёР»СЊС‚СЂР°С†РёРµР№ РїРѕ user_id Рё/РёР»Рё РІСЂРµРјРµРЅРЅРѕРјСѓ РїСЂРѕРјРµР¶СѓС‚РєСѓ
+// @Tags         statistics
+// @Produce      json
+// @Param        user_id  query     string     false "Р¤РёР»СЊС‚СЂР°С†РёСЏ СЃС‚Р°С‚РёСЃС‚РёРєРё РїРѕ РєРѕРЅРєСЂРµС‚РЅРѕРјСѓ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ" Format(uuid)
+// @Param        from     query     string  false "РќР°С‡Р°Р»Рѕ РїСЂРѕРјРµР¶СѓС‚РєР° СЂР°СЃСЃРјРѕС‚СЂРµРЅРёСЏ СЃС‚Р°С‚РёСЃС‚РёРєРё (РІРєР»СЋС‡РёС‚РµР»СЊРЅРѕ), С„РѕСЂРјР°С‚: YYYY-MM-DD"
+// @Param        to       query     string  false "РљРѕРЅРµС† РїСЂРѕРјРµР¶СѓС‚СЃСЏ СЂР°СЃСЃРјРѕС‚СЂРµРЅРёСЏ СЃС‚Р°С‚РёСЃС‚РёРєРё (РЅРµ РІРєР»СЋС‡РёС‚РµР»СЊРЅРѕ), С„РѕСЂРјР°С‚: YYYY-MM-DD"
+// @Success      200      {object}  GetStatisticsResponse "РЈСЃРїРµС€РЅРѕРµ РїРѕР»СѓС‡РµРЅРёРµ СЃС‚Р°С‚РёСЃС‚РёРєРё"
+// @Failure      400      {object}  core_http_response.ErrorResponse "Bad request"
+// @Failure      500      {object}  core_http_response.ErrorResponse "Internal server error"
+// @Router       /statistics [get]
+func (h *StatisticsHTTPHandler) GetStatistics(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	userID, from, to, err := getUserIDFromToQueryParams(r)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get userID/from/to query params",
+		)
+
+		return
+	}
+
+	statistics, err := h.statisticsService.GetStatistics(ctx, userID, from, to)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get statistics",
+		)
+
+		return
+	}
+
+	response := domainToDTO(statistics)
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+// domainToDTO РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚ Statistics РІ DTO.
+// time.Duration в†’ string С‡РµСЂРµР· .String() (РЅР°РїСЂРёРјРµСЂ, "2h30m15s").
+func domainToDTO(statistics domain.Statistics) GetStatisticsResponse {
+	var avgTime *string
+	if statistics.TasksAverageCompletionTime != nil {
+		duration := statistics.TasksAverageCompletionTime.String()
+		avgTime = &duration
+	}
+
+	return GetStatisticsResponse{
+		TasksCreated:               statistics.TasksCreated,
+		TasksCompleted:             statistics.TasksCompleted,
+		TasksCompletedRate:         statistics.TasksCompletedRate,
+		TasksAverageCompletionTime: avgTime,
+	}
+}
+
+// getUserIDFromToQueryParams РёР·РІР»РµРєР°РµС‚ Рё РїР°СЂСЃРёС‚ query-РїР°СЂР°РјРµС‚СЂС‹ user_id, from, to.
+func getUserIDFromToQueryParams(r *http.Request) (*uuid.UUID, *time.Time, *time.Time, error) {
+	const (
+		userIDQueryParamKey = "user_id"
+		fromQueryParamKey   = "from"
+		toQueryParamKey     = "to"
+	)
+
+	userID, err := core_http_request.GetUUIDQueryParam(r, userIDQueryParamKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get 'user_id' query param: %w", err)
+	}
+
+	from, err := core_http_request.GetDateQueryParam(r, fromQueryParamKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get 'from' query param: %w", err)
+	}
+
+	to, err := core_http_request.GetDateQueryParam(r, toQueryParamKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get 'to' query param: %w", err)
+	}
+
+	return userID, from, to, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\statistics\transport\http\transport.go ===
+// Package statistics_transport_http СЃРѕРґРµСЂР¶РёС‚ HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРєРё РґР»СЏ С„РёС‡Рё СЃС‚Р°С‚РёСЃС‚РёРєРё.
+package statistics_transport_http
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_http_server "github.com/cunofou/golang_todoapp/internal/core/transport/http/server"
+	"github.com/google/uuid"
+)
+
+// StatisticsHTTPHandler вЂ” HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРє РґР»СЏ РѕРїРµСЂР°С†РёР№ СЃРѕ СЃС‚Р°С‚РёСЃС‚РёРєРѕР№.
+type StatisticsHTTPHandler struct {
+	statisticsService StatisticsService
+}
+
+// StatisticsService вЂ” РёРЅС‚РµСЂС„РµР№СЃ СЃРµСЂРІРёСЃР° СЃС‚Р°С‚РёСЃС‚РёРєРё.
+type StatisticsService interface {
+	GetStatistics(
+		ctx context.Context,
+		userID *uuid.UUID,
+		from *time.Time,
+		to *time.Time,
+	) (domain.Statistics, error)
+}
+
+// NewStatisticsHTTPHandler СЃРѕР·РґР°С‘С‚ РѕР±СЂР°Р±РѕС‚С‡РёРє СЃС‚Р°С‚РёСЃС‚РёРєРё СЃ РІРЅРµРґСЂС‘РЅРЅС‹Рј СЃРµСЂРІРёСЃРѕРј.
+func NewStatisticsHTTPHandler(
+	statisticsService StatisticsService,
+) *StatisticsHTTPHandler {
+	return &StatisticsHTTPHandler{
+		statisticsService: statisticsService,
+	}
+}
+
+// Routes РІРѕР·РІСЂР°С‰Р°РµС‚ РјР°СЂС€СЂСѓС‚С‹ REST API РґР»СЏ СЃС‚Р°С‚РёСЃС‚РёРєРё.
+func (h *StatisticsHTTPHandler) Routes() []core_http_server.Route {
+	return []core_http_server.Route{
+		{
+			Method:  http.MethodGet,
+			Path:    "/statistics",
+			Handler: h.GetStatistics,
+		},
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\delete_task.go ===
+package tasks_postgres_repository
+
+import (
+	"context"
+	"fmt"
+
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	"github.com/google/uuid"
+)
+
+// DeleteTask СѓРґР°Р»СЏРµС‚ Р·Р°РґР°С‡Сѓ РїРѕ ID.
+// РџСЂРѕРІРµСЂСЏРµРј cmdTag.RowsAffected() == 0 РІРјРµСЃС‚Рѕ ErrNoRows, С‚.Рє. DELETE
+// РЅРµ РІРѕР·РІСЂР°С‰Р°РµС‚ СЃС‚СЂРѕРєРё вЂ” РёСЃРїРѕР»СЊР·СѓРµРј РєРѕР»РёС‡РµСЃС‚РІРѕ СѓРґР°Р»С‘РЅРЅС‹С… Р·Р°РїРёСЃРµР№ РґР»СЏ
+// РѕРїСЂРµРґРµР»РµРЅРёСЏ С„Р°РєС‚Р° СЃСѓС‰РµСЃС‚РІРѕРІР°РЅРёСЏ Р·Р°РґР°С‡Рё.
+func (r *TasksRepository) DeleteTask(
+	ctx context.Context,
+	id uuid.UUID,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	DELETE FROM todoapp.tasks
+	WHERE id=$1;
+	`
+
+	cmdTag, err := r.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("exec query: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return fmt.Errorf(
+			"task with id='%s': %w",
+			id,
+			core_errors.ErrNotFound,
+		)
+	}
+
+	return nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\get_task.go ===
+package tasks_postgres_repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+	"github.com/google/uuid"
+)
+
+// GetTask РІРѕР·РІСЂР°С‰Р°РµС‚ Р·Р°РґР°С‡Сѓ РїРѕ ID.
+// Р•СЃР»Рё Р·Р°РґР°С‡Р° РЅРµ РЅР°Р№РґРµРЅР° вЂ” ErrNoRows РёР· РїСѓР»Р° С‚СЂР°РЅСЃР»РёСЂСѓРµС‚СЃСЏ РІ core_errors.ErrNotFound,
+// С‡С‚Рѕ РїСЂРёРІРµРґС‘С‚ Рє HTTP 404 РІ С‚СЂР°РЅСЃРїРѕСЂС‚РЅРѕРј СЃР»РѕРµ.
+func (r *TasksRepository) GetTask(
+	ctx context.Context,
+	id uuid.UUID,
+) (domain.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	SELECT id, version, title, description, completed, created_at, completed_at, author_user_id
+	FROM todoapp.tasks
+	WHERE id=$1;
+	`
+
+	row := r.pool.QueryRow(ctx, query, id)
+
+	var taskModel TaskModel
+	if err := taskModel.Scan(row); err != nil {
+		if errors.Is(err, core_postgres_pool.ErrNoRows) {
+			return domain.Task{}, fmt.Errorf(
+				"task with id='%s': %w",
+				id,
+				core_errors.ErrNotFound,
+			)
+		}
+
+		return domain.Task{}, fmt.Errorf("scan error: %w", err)
+	}
+
+	taskDomain := modelToDomain(taskModel)
+
+	return taskDomain, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\get_tasks.go ===
+package tasks_postgres_repository
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// GetTasks РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє Р·Р°РґР°С‡ СЃ РїРѕРґРґРµСЂР¶РєРѕР№ РїР°РіРёРЅР°С†РёРё Рё С„РёР»СЊС‚СЂР°С†РёРё РїРѕ Р°РІС‚РѕСЂСѓ.
+//
+// Р•СЃР»Рё userID != nil вЂ” РґРѕР±Р°РІР»СЏРµС‚СЃСЏ WHERE author_user_id=$3, РёРЅР°С‡Рµ РІРѕР·РІСЂР°С‰Р°СЋС‚СЃСЏ РІСЃРµ Р·Р°РґР°С‡Рё.
+// Р”РёРЅР°РјРёС‡РµСЃРєР°СЏ РїРѕРґСЃС‚Р°РЅРѕРІРєР° WHERE С‡РµСЂРµР· fmt.Sprintf вЂ” РґРѕРїСѓСЃС‚РёРјР° Р·РґРµСЃСЊ, С‚.Рє.
+// РІ СЃС‚СЂРѕРєСѓ РїРѕРґСЃС‚Р°РІР»СЏРµС‚СЃСЏ С‚РѕР»СЊРєРѕ С„РёРєСЃРёСЂРѕРІР°РЅРЅС‹Р№ SQL-С„СЂР°РіРјРµРЅС‚, Р° РЅРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёР№ РІРІРѕРґ.
+// РџРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёР№ РІРІРѕРґ РІСЃРµРіРґР° РїРµСЂРµРґР°С‘С‚СЃСЏ С‡РµСЂРµР· РїР°СЂР°РјРµС‚СЂС‹ ($1, $2, $3) вЂ” Р·Р°С‰РёС‚Р° РѕС‚ SQL-РёРЅСЉРµРєС†РёР№.
+func (r *TasksRepository) GetTasks(
+	ctx context.Context,
+	userID *uuid.UUID,
+	limit *int,
+	offset *int,
+) ([]domain.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	SELECT id, version, title, description, completed, created_at, completed_at, author_user_id
+	FROM todoapp.tasks
+	%s
+	ORDER BY id ASC
+	LIMIT $1
+	OFFSET $2;
+	`
+
+	args := []any{limit, offset}
+
+	if userID != nil {
+		query = fmt.Sprintf(query, "WHERE author_user_id=$3")
+		args = append(args, userID)
+	} else {
+		query = fmt.Sprintf(query, "")
+	}
+
+	rows, err := r.pool.Query(
+		ctx,
+		query,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("select tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var taskModels []TaskModel
+
+	for rows.Next() {
+		var taskModel TaskModel
+
+		if err := taskModel.Scan(rows); err != nil {
+			return nil, fmt.Errorf("scan tasks: %w", err)
+		}
+
+		taskModels = append(taskModels, taskModel)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("next rows: %w", err)
+	}
+
+	taskDomains := modelsToDomains(taskModels)
+
+	return taskDomains, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\models.go ===
+package tasks_postgres_repository
+
+import (
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+	"github.com/google/uuid"
+)
+
+// TaskModel вЂ” СЃС‚СЂСѓРєС‚СѓСЂР° РґР»СЏ РјР°РїРїРёРЅРіР° СЃС‚СЂРѕРєРё С‚Р°Р±Р»РёС†С‹ `todoapp.tasks` РІ Go-С‚РёРї.
+// РџРѕСЂСЏРґРѕРє РїРѕР»РµР№ СЃРѕРІРїР°РґР°РµС‚ СЃ РїРѕСЂСЏРґРєРѕРј СЃС‚РѕР»Р±С†РѕРІ РІ SELECT-Р·Р°РїСЂРѕСЃР°С… СЂРµРїРѕР·РёС‚РѕСЂРёСЏ вЂ”
+// РёРјРµРЅРЅРѕ РІ СЌС‚РѕРј РїРѕСЂСЏРґРєРµ pgx Р·Р°РїРѕР»РЅСЏРµС‚ РїРѕР»СЏ РїСЂРё Scan.
+type TaskModel struct {
+	ID           uuid.UUID
+	Version      int
+	Title        string
+	Description  *string
+	Completed    bool
+	CreatedAt    time.Time
+	CompletedAt  *time.Time
+	AuthorUserID uuid.UUID
+}
+
+// Scan Р·Р°РїРѕР»РЅСЏРµС‚ РїРѕР»СЏ РјРѕРґРµР»Рё РёР· СЂРµР·СѓР»СЊС‚Р°С‚Р° Р·Р°РїСЂРѕСЃР° Рє Р‘Р”.
+// РџСЂРёРЅРёРјР°РµС‚ РёРЅС‚РµСЂС„РµР№СЃ Row (РЅРµ pgx.Row РЅР°РїСЂСЏРјСѓСЋ) РґР»СЏ РёР·РѕР»СЏС†РёРё РѕС‚ РґСЂР°Р№РІРµСЂР°.
+func (m *TaskModel) Scan(row core_postgres_pool.Row) error {
+	return row.Scan(
+		&m.ID,
+		&m.Version,
+		&m.Title,
+		&m.Description,
+		&m.Completed,
+		&m.CreatedAt,
+		&m.CompletedAt,
+		&m.AuthorUserID,
+	)
+}
+
+// modelToDomain РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ РјРѕРґРµР»СЊ Р‘Р” РІ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚.
+// Р­С‚Рѕ В«Р°РЅС‚РёРєРѕСЂСЂСѓРїС†РёРѕРЅРЅС‹Р№ СЃР»РѕР№В» РјРµР¶РґСѓ С…СЂР°РЅРёР»РёС‰РµРј Рё Р±РёР·РЅРµСЃ-Р»РѕРіРёРєРѕР№:
+// СЃРµСЂРІРёСЃ СЂР°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ СЃ domain.Task, РЅРµ Р·РЅР°СЏ Рѕ СЃС‚СЂСѓРєС‚СѓСЂРµ Р‘Р”.
+func modelToDomain(model TaskModel) domain.Task {
+	return domain.NewTask(
+		model.ID,
+		model.Version,
+		model.Title,
+		model.Description,
+		model.Completed,
+		model.CreatedAt,
+		model.CompletedAt,
+		model.AuthorUserID,
+	)
+}
+
+// modelsToDomains РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ СЃРїРёСЃРѕРє РјРѕРґРµР»РµР№ Р‘Р” РІ СЃРїРёСЃРѕРє РґРѕРјРµРЅРЅС‹С… РѕР±СЉРµРєС‚РѕРІ.
+func modelsToDomains(models []TaskModel) []domain.Task {
+	domains := make([]domain.Task, len(models))
+
+	for i, model := range models {
+		domains[i] = modelToDomain(model)
+	}
+
+	return domains
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\repository.go ===
+// Package tasks_postgres_repository СЂРµР°Р»РёР·СѓРµС‚ РґРѕСЃС‚СѓРї Рє РґР°РЅРЅС‹Рј Р·Р°РґР°С‡ РІ PostgreSQL.
+// РљР°Р¶РґР°СЏ РѕРїРµСЂР°С†РёСЏ (GetTask, GetTasks, SaveTask, UpdateTask, DeleteTask) РІС‹РЅРµСЃРµРЅР°
+// РІ РѕС‚РґРµР»СЊРЅС‹Р№ С„Р°Р№Р» РґР»СЏ С‡РёС‚Р°РµРјРѕСЃС‚Рё.
+package tasks_postgres_repository
+
+import core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+
+// TasksRepository вЂ” СЂРµР°Р»РёР·Р°С†РёСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ Р·Р°РґР°С‡ РЅР° Р±Р°Р·Рµ PostgreSQL.
+// РџСЂРёРЅРёРјР°РµС‚ РёРЅС‚РµСЂС„РµР№СЃ core_postgres_pool.Pool, Р° РЅРµ РєРѕРЅРєСЂРµС‚РЅС‹Р№ С‚РёРї pgx,
+// С‡С‚Рѕ РїРѕР·РІРѕР»СЏРµС‚ РїРѕРґРјРµРЅРёС‚СЊ СЂРµР°Р»РёР·Р°С†РёСЋ Р‘Р” РІ С‚РµСЃС‚Р°С… Р±РµР· РёР·РјРµРЅРµРЅРёСЏ СЌС‚РѕРіРѕ РєРѕРґР°.
+type TasksRepository struct {
+	pool core_postgres_pool.Pool
+}
+
+// NewTasksRepository СЃРѕР·РґР°С‘С‚ СЂРµРїРѕР·РёС‚РѕСЂРёР№ Р·Р°РґР°С‡ СЃ РїРµСЂРµРґР°РЅРЅС‹Рј РїСѓР»РѕРј СЃРѕРµРґРёРЅРµРЅРёР№.
+func NewTasksRepository(
+	pool core_postgres_pool.Pool,
+) *TasksRepository {
+	return &TasksRepository{
+		pool: pool,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\save_task.go ===
+package tasks_postgres_repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+)
+
+// SaveTask РІСЃС‚Р°РІР»СЏРµС‚ РЅРѕРІСѓСЋ Р·Р°РґР°С‡Сѓ РІ Р‘Р” Рё РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅСѓСЋ РІРµСЂСЃРёСЋ (СЃ РґР°РЅРЅС‹РјРё РёР· Р‘Р”).
+// RETURNING РїРѕР·РІРѕР»СЏРµС‚ РїРѕР»СѓС‡РёС‚СЊ РёС‚РѕРіРѕРІРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ Р·Р°РїРёСЃРё РѕРґРЅРёРј Р·Р°РїСЂРѕСЃРѕРј,
+// Р±РµР· РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅРѕРіРѕ SELECT (С‚.РЅ. В«insert and returnВ» РїР°С‚С‚РµСЂРЅ).
+//
+// Р•СЃР»Рё author_user_id РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚ РІ С‚Р°Р±Р»РёС†Рµ users вЂ” PostgreSQL РІРµСЂРЅС‘С‚
+// РѕС€РёР±РєСѓ РІРЅРµС€РЅРµРіРѕ РєР»СЋС‡Р° (РєРѕРґ 23503), РєРѕС‚РѕСЂСѓСЋ Р°РґР°РїС‚РµСЂ pgx РїСЂРµРѕР±СЂР°Р·СѓРµС‚
+// РІ ErrViolatesForeignKey в†’ РјС‹ С‚СЂР°РЅСЃР»РёСЂСѓРµРј РІ ErrNotFound (Р°РІС‚РѕСЂ РЅРµ РЅР°Р№РґРµРЅ).
+func (r *TasksRepository) SaveTask(
+	ctx context.Context,
+	task domain.Task,
+) (domain.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	INSERT INTO todoapp.tasks (id, version, title, description, completed, created_at, completed_at, author_user_id)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	RETURNING id, version, title, description, completed, created_at, completed_at, author_user_id;
+	`
+
+	row := r.pool.QueryRow(
+		ctx,
+		query,
+		task.ID,
+		task.Version,
+		task.Title,
+		task.Description,
+		task.Completed,
+		task.CreatedAt,
+		task.CompletedAt,
+		task.AuthorUserID,
+	)
+
+	var taskModel TaskModel
+	if err := taskModel.Scan(row); err != nil {
+		if errors.Is(err, core_postgres_pool.ErrViolatesForeignKey) {
+			return domain.Task{}, fmt.Errorf(
+				"%v: user with id='%s': %w",
+				err,
+				task.AuthorUserID,
+				core_errors.ErrNotFound,
+			)
+		}
+
+		return domain.Task{}, fmt.Errorf("scan error: %w", err)
+	}
+
+	taskDomain := modelToDomain(taskModel)
+
+	return taskDomain, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\repository\postgres\update_task.go ===
+package tasks_postgres_repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+)
+
+// UpdateTask РѕР±РЅРѕРІР»СЏРµС‚ Р·Р°РґР°С‡Сѓ РІ Р‘Р” Рё РІРѕР·РІСЂР°С‰Р°РµС‚ РѕР±РЅРѕРІР»С‘РЅРЅСѓСЋ РІРµСЂСЃРёСЋ.
+//
+// Р РµР°Р»РёР·СѓРµС‚ РѕРїС‚РёРјРёСЃС‚РёС‡РЅСѓСЋ Р±Р»РѕРєРёСЂРѕРІРєСѓ (optimistic locking):
+// СѓСЃР»РѕРІРёРµ WHERE id=$5 AND version=$6 РіР°СЂР°РЅС‚РёСЂСѓРµС‚, С‡С‚Рѕ Р·Р°РїРёСЃСЊ РЅРµ Р±С‹Р»Р° РёР·РјРµРЅРµРЅР°
+// РїР°СЂР°Р»Р»РµР»СЊРЅС‹Рј Р·Р°РїСЂРѕСЃРѕРј СЃ РјРѕРјРµРЅС‚Р° РµС‘ С‡С‚РµРЅРёСЏ.
+//
+// Р•СЃР»Рё РґСЂСѓРіРѕР№ Р·Р°РїСЂРѕСЃ СѓР¶Рµ РѕР±РЅРѕРІРёР» Р·Р°РїРёСЃСЊ (version СѓРІРµР»РёС‡РёР»Р°СЃСЊ), RETURNING РЅРµ РІРµСЂРЅС‘С‚ СЃС‚СЂРѕРє
+// (ErrNoRows), Рё РјС‹ РІРѕР·РІСЂР°С‰Р°РµРј ErrConflict в†’ HTTP 409.
+//
+// version=version+1 Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё СѓРІРµР»РёС‡РёРІР°РµС‚ СЃС‡С‘С‚С‡РёРє РїСЂРё РєР°Р¶РґРѕРј РѕР±РЅРѕРІР»РµРЅРёРё.
+func (r *TasksRepository) UpdateTask(
+	ctx context.Context,
+	task domain.Task,
+) (domain.Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	UPDATE todoapp.tasks
+	SET
+		title=$1,
+		description=$2,
+		completed=$3,
+		completed_at=$4,
+		version=version + 1
+
+	WHERE id=$5 AND version=$6
+
+	RETURNING
+		id,
+		version,
+		title,
+		description,
+		completed,
+		created_at,
+		completed_at,
+		author_user_id;
+	`
+
+	row := r.pool.QueryRow(
+		ctx,
+		query,
+		task.Title,
+		task.Description,
+		task.Completed,
+		task.CompletedAt,
+		task.ID,
+		task.Version,
+	)
+
+	var taskModel TaskModel
+	if err := taskModel.Scan(row); err != nil {
+		if errors.Is(err, core_postgres_pool.ErrNoRows) {
+			return domain.Task{}, fmt.Errorf(
+				"task with id='%s' concurrently accessed: %w",
+				task.ID,
+				core_errors.ErrConflict,
+			)
+		}
+
+		return domain.Task{}, fmt.Errorf("scan error: %w", err)
+	}
+
+	taskDomain := modelToDomain(taskModel)
+
+	return taskDomain, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\service\create_task.go ===
+package tasks_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// CreateTask СЃРѕР·РґР°С‘С‚ РЅРѕРІСѓСЋ Р·Р°РґР°С‡Сѓ: С„РѕСЂРјРёСЂСѓРµС‚ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚, РІР°Р»РёРґРёСЂСѓРµС‚ РµРіРѕ
+// Рё СЃРѕС…СЂР°РЅСЏРµС‚ С‡РµСЂРµР· СЂРµРїРѕР·РёС‚РѕСЂРёР№.
+//
+// РџРѕСЂСЏРґРѕРє РґРµР№СЃС‚РІРёР№:
+//  1. domain.CreateTask вЂ” РіРµРЅРµСЂРёСЂСѓРµС‚ UUID, version=1, completed=false, createdAt=now
+//  2. task.Validate()   вЂ” РїСЂРѕРІРµСЂСЏРµС‚ РёРЅРІР°СЂРёР°РЅС‚С‹ (РґР»РёРЅР° Title, РєРѕСЂСЂРµРєС‚РЅРѕСЃС‚СЊ CompletedAt Рё С‚.Рґ.)
+//  3. repository.SaveTask вЂ” РІСЃС‚Р°РІР»СЏРµС‚ Р·Р°РїРёСЃСЊ РІ Р‘Р” Рё РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ
+func (s *TasksService) CreateTask(
+	ctx context.Context,
+	title string,
+	description *string,
+	authorUserID uuid.UUID,
+) (domain.Task, error) {
+	task := domain.CreateTask(
+		title,
+		description,
+		authorUserID,
+	)
+
+	if err := task.Validate(); err != nil {
+		return domain.Task{}, fmt.Errorf("validate task domain: %w", err)
+	}
+
+	task, err := s.tasksRepository.SaveTask(ctx, task)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("save task in repository: %w", err)
+	}
+
+	return task, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\service\delete_task.go ===
+package tasks_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/google/uuid"
+)
+
+// DeleteTask СѓРґР°Р»СЏРµС‚ Р·Р°РґР°С‡Сѓ РїРѕ ID, РґРµР»РµРіРёСЂСѓСЏ Р·Р°РїСЂРѕСЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЋ.
+func (s *TasksService) DeleteTask(
+	ctx context.Context,
+	id uuid.UUID,
+) error {
+	if err := s.tasksRepository.DeleteTask(ctx, id); err != nil {
+		return fmt.Errorf("delete task from repository: %w", err)
+	}
+
+	return nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\service\get_task.go ===
+package tasks_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// GetTask РІРѕР·РІСЂР°С‰Р°РµС‚ Р·Р°РґР°С‡Сѓ РїРѕ ID, РґРµР»РµРіРёСЂСѓСЏ Р·Р°РїСЂРѕСЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЋ.
+func (s *TasksService) GetTask(
+	ctx context.Context,
+	id uuid.UUID,
+) (domain.Task, error) {
+	task, err := s.tasksRepository.GetTask(ctx, id)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("get task from repository: %w", err)
+	}
+
+	return task, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\service\get_tasks.go ===
+package tasks_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	"github.com/google/uuid"
+)
+
+// GetTasks РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє Р·Р°РґР°С‡ СЃ РїР°РіРёРЅР°С†РёРµР№ Рё РѕРїС†РёРѕРЅР°Р»СЊРЅС‹Рј С„РёР»СЊС‚СЂРѕРј РїРѕ Р°РІС‚РѕСЂСѓ.
+// Р’Р°Р»РёРґРёСЂСѓРµС‚ limit Рё offset РґРѕ РѕР±СЂР°С‰РµРЅРёСЏ Рє СЂРµРїРѕР·РёС‚РѕСЂРёСЋ, С‡С‚РѕР±С‹ РЅРµ РґРµР»Р°С‚СЊ
+// Р±РµСЃСЃРјС‹СЃР»РµРЅРЅС‹Р№ Р·Р°РїСЂРѕСЃ СЃ РЅРµРєРѕСЂСЂРµРєС‚РЅС‹РјРё РїР°СЂР°РјРµС‚СЂР°РјРё.
+func (s *TasksService) GetTasks(
+	ctx context.Context,
+	userID *uuid.UUID,
+	limit *int,
+	offset *int,
+) ([]domain.Task, error) {
+	if limit != nil && *limit < 0 {
+		return nil, fmt.Errorf(
+			"limit must be non-negative: %w",
+			core_errors.ErrInvalidArgument,
+		)
+	}
+
+	if offset != nil && *offset < 0 {
+		return nil, fmt.Errorf(
+			"offset must be non-negative: %w",
+			core_errors.ErrInvalidArgument,
+		)
+	}
+
+	tasks, err := s.tasksRepository.GetTasks(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("get tasks from repository: %w", err)
+	}
+
+	return tasks, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\service\patch_task.go ===
+package tasks_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// PatchTask С‡Р°СЃС‚РёС‡РЅРѕ РѕР±РЅРѕРІР»СЏРµС‚ Р·Р°РґР°С‡Сѓ РїРѕ ID.
+//
+// РџР°С‚С‚РµСЂРЅ В«read-modify-writeВ» СЃ РѕРїС‚РёРјРёСЃС‚РёС‡РЅРѕР№ Р±Р»РѕРєРёСЂРѕРІРєРѕР№:
+//  1. GetTask вЂ” С‡РёС‚Р°РµРј С‚РµРєСѓС‰РµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ Р·Р°РґР°С‡Рё (РІРєР»СЋС‡Р°СЏ Р°РєС‚СѓР°Р»СЊРЅС‹Р№ version)
+//  2. ApplyPatch вЂ” РїСЂРёРјРµРЅСЏРµРј РёР·РјРµРЅРµРЅРёСЏ Рє РєРѕРїРёРё (СЃ РІРЅСѓС‚СЂРµРЅРЅРµР№ РІР°Р»РёРґР°С†РёРµР№)
+//  3. UpdateTask вЂ” СЃРѕС…СЂР°РЅСЏРµРј; WHERE version=$N Р·Р°С‰РёС‰Р°РµС‚ РѕС‚ РєРѕРЅРєСѓСЂРµРЅС‚РЅРѕРіРѕ РёР·РјРµРЅРµРЅРёСЏ
+func (s *TasksService) PatchTask(
+	ctx context.Context,
+	id uuid.UUID,
+	patch domain.TaskPatch,
+) (domain.Task, error) {
+	task, err := s.tasksRepository.GetTask(ctx, id)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("get task from repository: %w", err)
+	}
+
+	if err := task.ApplyPatch(patch); err != nil {
+		return domain.Task{}, fmt.Errorf("apply task patch: %w", err)
+	}
+
+	patchedTask, err := s.tasksRepository.UpdateTask(ctx, task)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("update task in repository: %w", err)
+	}
+
+	return patchedTask, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\service\service.go ===
+// Package tasks_service СЃРѕРґРµСЂР¶РёС‚ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєСѓ СѓРїСЂР°РІР»РµРЅРёСЏ Р·Р°РґР°С‡Р°РјРё.
+// РЎРµСЂРІРёСЃ РѕСЂРєРµСЃС‚СЂРёСЂСѓРµС‚ СЂР°Р±РѕС‚Сѓ СЃ СЂРµРїРѕР·РёС‚РѕСЂРёРµРј: РІР°Р»РёРґРёСЂСѓРµС‚ РІС…РѕРґРЅС‹Рµ РґР°РЅРЅС‹Рµ,
+// СЃРѕР·РґР°С‘С‚ РґРѕРјРµРЅРЅС‹Рµ РѕР±СЉРµРєС‚С‹ Рё РїСЂРёРјРµРЅСЏРµС‚ Р±РёР·РЅРµСЃ-РїСЂР°РІРёР»Р° РїРµСЂРµРґ СЃРѕС…СЂР°РЅРµРЅРёРµРј.
+package tasks_service
+
+import (
+	"context"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// TasksService вЂ” СЃРµСЂРІРёСЃ Р·Р°РґР°С‡. РЎРѕРґРµСЂР¶РёС‚ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєСѓ, РЅРµ Р·Р°РІСЏР·Р°РЅРЅСѓСЋ
+// РЅР° РґРµС‚Р°Р»Рё С…СЂР°РЅРёР»РёС‰Р° РёР»Рё С‚СЂР°РЅСЃРїРѕСЂС‚РЅРѕРіРѕ РїСЂРѕС‚РѕРєРѕР»Р°.
+type TasksService struct {
+	tasksRepository TasksRepository
+}
+
+// TasksRepository вЂ” РёРЅС‚РµСЂС„РµР№СЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ Р·Р°РґР°С‡, РєРѕС‚РѕСЂС‹Р№ РґРѕР»Р¶РЅР° СЂРµР°Р»РёР·РѕРІР°С‚СЊ
+// РєРѕРЅРєСЂРµС‚РЅР°СЏ СЂРµР°Р»РёР·Р°С†РёСЏ С…СЂР°РЅРёР»РёС‰Р° (РЅР°РїСЂРёРјРµСЂ, PostgreSQL).
+//
+// РћРїСЂРµРґРµР»РµРЅРёРµ РёРЅС‚РµСЂС„РµР№СЃР° РІ РїР°РєРµС‚Рµ СЃРµСЂРІРёСЃР° (Р° РЅРµ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ) вЂ” СЌС‚Рѕ РїР°С‚С‚РµСЂРЅ
+// В«Interface SegregationВ» Рё В«Dependency InversionВ»: СЃРµСЂРІРёСЃ РІР»Р°РґРµРµС‚ РєРѕРЅС‚СЂР°РєС‚РѕРј,
+// Р° СЂРµРїРѕР·РёС‚РѕСЂРёР№ РµРіРѕ РІС‹РїРѕР»РЅСЏРµС‚. Р­С‚Рѕ СѓРїСЂРѕС‰Р°РµС‚ С‚РµСЃС‚РёСЂРѕРІР°РЅРёРµ С‡РµСЂРµР· mock-РѕР±СЉРµРєС‚С‹.
+type TasksRepository interface {
+	SaveTask(
+		ctx context.Context,
+		task domain.Task,
+	) (domain.Task, error)
+
+	GetTasks(
+		ctx context.Context,
+		userID *uuid.UUID,
+		limit *int,
+		offset *int,
+	) ([]domain.Task, error)
+
+	GetTask(
+		ctx context.Context,
+		id uuid.UUID,
+	) (domain.Task, error)
+
+	DeleteTask(
+		ctx context.Context,
+		id uuid.UUID,
+	) error
+
+	UpdateTask(
+		ctx context.Context,
+		task domain.Task,
+	) (domain.Task, error)
+}
+
+// NewTasksService СЃРѕР·РґР°С‘С‚ СЃРµСЂРІРёСЃ Р·Р°РґР°С‡ СЃ РІРЅРµРґСЂС‘РЅРЅС‹Рј СЂРµРїРѕР·РёС‚РѕСЂРёРµРј.
+func NewTasksService(
+	tasksRepository TasksRepository,
+) *TasksService {
+	return &TasksService{
+		tasksRepository: tasksRepository,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\create_task.go ===
+package tasks_transport_http
+
+import (
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	"github.com/google/uuid"
+)
+
+type CreateTaskRequest struct {
+	Title        string    `json:"title" validate:"required,min=1,max=100"         example:"Р”РѕРјР°С€РЅРµРµ Р·Р°РґР°РЅРёРµ"`
+	Description  *string   `json:"description" validate:"omitempty,min=1,max=1000" example:"РЎРґРµР»Р°С‚СЊ РґРѕ С‡РµС‚РІРµСЂРіР° РґРѕРјР°С€РЅРµРµ Р·Р°РґР°РЅРёРµ РїРѕ РјР°С‚РµРјР°С‚РёРєРµ"`
+	AuthorUserID uuid.UUID `json:"author_user_id" validate:"required"              example:"550e8400-e29b-41d4-a716-446655440000"`
+}
+
+type CreateTaskResponse TaskDTOResponse
+
+// CreateTask    godoc
+// @Summary      РЎРѕР·РґР°С‚СЊ Р·Р°РґР°С‡Сѓ
+// @Description  РЎРѕР·РґР°С‚СЊ РЅРѕРІСѓСЋ Р·Р°РґР°С‡Сѓ РІ СЃРёСЃС‚РµРјРµ
+// @Tags         tasks
+// @Accept       json
+// @Produce      json
+// @Param        request  body      CreateTaskRequest   true  "CreateTask С‚РµР»Рѕ Р·Р°РїСЂРѕСЃР°"
+// @Success      201      {object}  CreateTaskResponse  "РЈСЃРїРµС€РЅРѕ СЃРѕР·РґР°РЅРЅР°СЏ Р·Р°РґР°С‡Р°"
+// @Failure      400      {object}  core_http_response.ErrorResponse "Bad request"
+// @Failure      404      {object} 	core_http_response.ErrorResponse "Author not found"
+// @Failure      500      {object}  core_http_response.ErrorResponse "Internal server error"
+// @Router       /tasks [post]
+func (h *TasksHTTPHandler) CreateTask(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	var request CreateTaskRequest
+	if err := core_http_request.DecodeAndValidateRequest(r, &request); err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to decode and validate HTTP request",
+		)
+
+		return
+	}
+
+	taskDomain, err := h.tasksService.CreateTask(
+		ctx,
+		request.Title,
+		request.Description,
+		request.AuthorUserID,
+	)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to create task",
+		)
+
+		return
+	}
+
+	response := CreateTaskResponse(taskDTOFromDomain(taskDomain))
+
+	responseHandler.JSONResponse(response, http.StatusCreated)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\delete_task.go ===
+package tasks_transport_http
+
+import (
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+)
+
+// DeleteTask    godoc
+// @Summary      РЈРґР°Р»РµРЅРёРµ Р·Р°РґР°С‡Рё
+// @Description  РЈРґР°Р»РёС‚СЊ СЃСѓС‰РµСЃС‚РІСѓСЋС‰СѓСЋ РІ СЃРёСЃС‚РµРјРµ Р·Р°РґР°С‡Сѓ РїРѕ РµС‘ ID
+// @Tags         tasks
+// @Param        id   path  string  true "ID СѓРґР°Р»СЏРµРјРѕР№ Р·Р°РґР°С‡Рё" Format(uuid)
+// @Success      204  "РЈСЃРїРµС€РЅРѕРµ СѓРґР°Р»РµРЅРёРµ Р·Р°РґР°С‡Рё"
+// @Failure      400  {object}  core_http_response.ErrorResponse "Bad request"
+// @Failure      404  {object}  core_http_response.ErrorResponse "Task not found"
+// @Failure      500  {object}  core_http_response.ErrorResponse "Internal server error"
+// @Router       /tasks/{id} [delete]
+func (h *TasksHTTPHandler) DeleteTask(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	taskID, err := core_http_request.GetUUIDPathValue(r, "id")
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get taskID path value",
+		)
+
+		return
+	}
+
+	if err := h.tasksService.DeleteTask(ctx, taskID); err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to delete task",
+		)
+
+		return
+	}
+
+	responseHandler.NoContentResponse()
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\dto_common.go ===
+package tasks_transport_http
+
+import (
+	"time"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// TaskDTOResponse вЂ” DTO (Data Transfer Object) РґР»СЏ РїСЂРµРґСЃС‚Р°РІР»РµРЅРёСЏ Р·Р°РґР°С‡Рё РІ API-РѕС‚РІРµС‚Рµ.
+// DTO РЅР°РјРµСЂРµРЅРЅРѕ РѕС‚РґРµР»С‘РЅ РѕС‚ РґРѕРјРµРЅРЅРѕР№ РјРѕРґРµР»Рё: СЌС‚Рѕ РїРѕР·РІРѕР»СЏРµС‚ РјРµРЅСЏС‚СЊ СЃС‚СЂСѓРєС‚СѓСЂСѓ РѕС‚РІРµС‚Р° API
+// РЅРµР·Р°РІРёСЃРёРјРѕ РѕС‚ РІРЅСѓС‚СЂРµРЅРЅРµРіРѕ РїСЂРµРґСЃС‚Р°РІР»РµРЅРёСЏ РґР°РЅРЅС‹С….
+//
+// РўРµРіРё example РёСЃРїРѕР»СЊР·СѓСЋС‚СЃСЏ Swagger РґР»СЏ РіРµРЅРµСЂР°С†РёРё РґРѕРєСѓРјРµРЅС‚Р°С†РёРё.
+type TaskDTOResponse struct {
+	ID           uuid.UUID  `json:"id"             example:"15"`
+	Version      int        `json:"version"        example:"3"`
+	Title        string     `json:"title"          example:"Р”РѕРјР°С€РєР°"`
+	Description  *string    `json:"description"    example:"РЎРґРµР»Р°С‚СЊ РґРѕ С‡РµС‚РІРµСЂРіР° РґРѕРјР°С€РЅРµРµ Р·Р°РґР°РЅРёРµ РїРѕ РјР°С‚РµРјР°С‚РёРєРµ"`
+	Completed    bool       `json:"completed"      example:"false"`
+	CreatedAt    time.Time  `json:"created_at"     example:"2026-02-26T10:30:00Z"`
+	CompletedAt  *time.Time `json:"completed_at"   example:"null"`
+	AuthorUserID uuid.UUID  `json:"author_user_id" example:"5"`
+}
+
+// taskDTOFromDomain РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚ РІ DTO РґР»СЏ HTTP-РѕС‚РІРµС‚Р°.
+func taskDTOFromDomain(task domain.Task) TaskDTOResponse {
+	return TaskDTOResponse{
+		ID:           task.ID,
+		Version:      task.Version,
+		Title:        task.Title,
+		Description:  task.Description,
+		Completed:    task.Completed,
+		CreatedAt:    task.CreatedAt,
+		CompletedAt:  task.CompletedAt,
+		AuthorUserID: task.AuthorUserID,
+	}
+}
+
+// taskDTOsFromDomains РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ СЃРїРёСЃРѕРє РґРѕРјРµРЅРЅС‹С… РѕР±СЉРµРєС‚РѕРІ РІ СЃРїРёСЃРѕРє DTO.
+func taskDTOsFromDomains(tasks []domain.Task) []TaskDTOResponse {
+	dtos := make([]TaskDTOResponse, len(tasks))
+
+	for i, task := range tasks {
+		dtos[i] = taskDTOFromDomain(task)
+	}
+
+	return dtos
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\get_task.go ===
+package tasks_transport_http
+
+import (
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+)
+
+type GetTaskResponse TaskDTOResponse
+
+// GetTask       godoc
+// @Summary      РџРѕР»СѓС‡РµРЅРёРµ Р·Р°РґР°С‡Рё
+// @Description  РџРѕР»СѓС‡РµРЅРёРµ РєРѕРЅРєСЂРµС‚РЅРѕР№ Р·Р°РґР°С‡Рё РїРѕ РµС‘ ID
+// @Tags         tasks
+// @Produce      json
+// @Param        id   path      string  true "ID РїРѕР»СѓС‡Р°РµРјРѕР№ Р·Р°РґР°С‡Рё" Format(uuid)
+// @Success      200  {object}  GetTaskResponse "Р—Р°РґР°С‡Р° СѓСЃРїРµС€РЅРѕР№ РЅР°Р№РґРµРЅР°"
+// @Failure      400  {object}  core_http_response.ErrorResponse "Bad request"
+// @Failure      404  {object}  core_http_response.ErrorResponse "Task not found"
+// @Failure      500  {object}  core_http_response.ErrorResponse "Internal server error"
+// @Router       /tasks/{id} [get]
+func (h *TasksHTTPHandler) GetTask(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	taskID, err := core_http_request.GetUUIDPathValue(r, "id")
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get taskID path value",
+		)
+
+		return
+	}
+
+	taskDomain, err := h.tasksService.GetTask(ctx, taskID)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get task",
+		)
+
+		return
+	}
+
+	response := GetTaskResponse(taskDTOFromDomain(taskDomain))
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\get_tasks.go ===
+package tasks_transport_http
+
+import (
+	"fmt"
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	"github.com/google/uuid"
+)
+
+type GetTasksResponse []TaskDTOResponse
+
+// GetTasks      godoc
+// @Summary      РЎРїРёСЃРѕРє Р·Р°РґР°С‡
+// @Description  РџСЂРѕСЃРјРѕС‚СЂ СЃРїРёСЃРєР° Р·Р°РґР°С‡ СЃ РѕРїС†РёРѕРЅР°Р»СЊРЅРѕР№ РїР°РіРёРЅР°С†РёРµР№ Рё/РёР»Рё С„РёР»СЊС‚СЂР°С†РёРµР№ РїРѕ ID Р°РІС‚РѕСЂР° Р·Р°РґР°С‡Рё
+// @Tags         tasks
+// @Produce      json
+// @Param        user_id  query     string  false  "Р¤РёР»СЊС‚СЂР°С†РёСЏ Р·Р°РґР°С‡ РїРѕ ID Р°РІС‚РѕСЂР°" Format(uuid)
+// @Param        limit    query     int  false  "Р Р°Р·РјРµСЂ СЃС‚СЂР°РЅРёС†С‹ СЃ Р·Р°РґР°С‡Р°РјРё"
+// @Param        offset   query     int  false  "РЎРјРµС‰РµРЅРёРµ СЃС‚СЂР°РЅРёС†С‹ СЃ Р·Р°РґР°С‡Р°РјРё"
+// @Success      200      {object}  GetTasksResponse                 "РЎРїРёСЃРѕРє Р·Р°РґР°С‡"
+// @Failure      400      {object}  core_http_response.ErrorResponse "Bad request"
+// @Failure      500      {object}  core_http_response.ErrorResponse "Internal server error"
+// @Router       /tasks [get]
+func (h *TasksHTTPHandler) GetTasks(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	userID, limit, offset, err := getUserIDLimitOffsetQueryParams(r)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get userID/limit/offset query params",
+		)
+
+		return
+	}
+
+	tasksDomains, err := h.tasksService.GetTasks(ctx, userID, limit, offset)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get tasks",
+		)
+
+		return
+	}
+
+	response := GetTasksResponse(taskDTOsFromDomains(tasksDomains))
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+func getUserIDLimitOffsetQueryParams(r *http.Request) (*uuid.UUID, *int, *int, error) {
+	const (
+		userIDQueryParamKey = "user_id"
+		limitQueryParamKey  = "limit"
+		offsetQueryParamKey = "offset"
+	)
+
+	userID, err := core_http_request.GetUUIDQueryParam(r, userIDQueryParamKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get 'user_id' query param: %w", err)
+	}
+
+	limit, err := core_http_request.GetIntQueryParam(r, limitQueryParamKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get 'limit' query param: %w", err)
+	}
+
+	offset, err := core_http_request.GetIntQueryParam(r, offsetQueryParamKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get 'offset' query param: %w", err)
+	}
+
+	return userID, limit, offset, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\patch_task.go ===
+package tasks_transport_http
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	core_http_types "github.com/cunofou/golang_todoapp/internal/core/transport/http/types"
+)
+
+type PatchTaskRequest struct {
+	Title       core_http_types.Nullable[string] `json:"title"       swaggertype:"string" example:"РџРѕРіСѓР»СЏС‚СЊ СЃ СЃРѕР±Р°РєРѕР№"`
+	Description core_http_types.Nullable[string] `json:"description" swaggertype:"string" example:"null"`
+	Completed   core_http_types.Nullable[bool]   `json:"completed"   swaggertype:"boolean"`
+}
+
+func (r *PatchTaskRequest) Validate() error {
+	if r.Title.Set {
+		if r.Title.Value == nil {
+			return fmt.Errorf("`Title` can't be NULL")
+		}
+
+		titleLen := len([]rune(*r.Title.Value))
+		if titleLen < 1 || titleLen > 100 {
+			return fmt.Errorf("`Title` must be between 1 and 100 symbols")
+		}
+	}
+
+	if r.Description.Set {
+		if r.Description.Value != nil {
+			descriptionLen := len([]rune(*r.Description.Value))
+			if descriptionLen < 1 || descriptionLen > 1000 {
+				return fmt.Errorf("`Description` must be between 1 and 1000 symbols")
+			}
+		}
+	}
+
+	if r.Completed.Set {
+		if r.Completed.Value == nil {
+			return fmt.Errorf("`Completed` can't be NULL")
+		}
+	}
+
+	return nil
+}
+
+type PatchUserResponse TaskDTOResponse
+
+// PatchTask     godoc
+// @Summary      РћР±РЅРѕРІРёС‚СЊ Р·Р°РґР°С‡Сѓ
+// @Description  РћР±РЅРѕРІР»СЏРµС‚ РёРЅС„РѕСЂРјР°С†РёСЋ РѕР± СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµР№ РІ СЃРёСЃС‚РµРјРµ Р·Р°РґР°С‡Рµ
+// @Description  ### Р›РѕРіРёРєР° РѕР±РЅРѕРІР»РµРЅРёСЏ РїРѕР»РµР№ (Three-state logic):
+// @Description  1. **РџРѕР»Рµ РЅРµ РїРµСЂРµРґР°РЅРѕ**: `description` РёРіРЅРѕСЂРёСЂСѓРµС‚СЃСЏ, Р·РЅР°С‡РµРЅРёРµ РІ Р‘Р” РЅРµ РјРµРЅСЏРµС‚СЃСЏ
+// @Description  2. **РЇРІРЅРѕ РїРµСЂРµРґР°РЅРѕ Р·РЅР°С‡РµРЅРёРµ**: `"description": "РЈС‚СЂРѕРј РІ 06:30 РІС‹Р№С‚Рё РЅР° РїСЂРѕРіСѓР»РєСѓ СЃ Р‘РѕР±РёРєРѕРј"` вЂ” СѓСЃС‚Р°РЅР°РІР»РёРІР°РµС‚ РЅРѕРІРѕРµ РѕРїРёСЃР°РЅРёРµ РґР»СЏ Р·Р°РґР°С‡Рё
+// @Description  3. **РЇРІРЅРѕ РїРµСЂРµРґР°РЅ null**: `"description": null`вЂ” РѕС‡РёС‰Р°РµС‚ РїРѕР»Рµ РІ Р‘Р” (set to NULL)
+// @Description  РћРіСЂР°РЅРёС‡РµРЅРёСЏ: `title` Рё `completed` РЅРµ РјРѕРіСѓС‚ Р±С‹С‚СЊ РІС‹СЃС‚Р°РІР»РµРЅС‹ РєР°Рє null
+// @Tags         tasks
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string               true  "ID РёР·РјРµРЅСЏРµРјРѕР№ Р·Р°РґР°С‡Рё" Format(uuid)
+// @Param        request  body      PatchTaskRequest  true  "PatchTask С‚РµР»Рѕ Р·Р°РїСЂРѕСЃР°"
+// @Success      200      {object}  PatchUserResponse                "РЈСЃРїРµС€РЅРѕ РёР·РјРµРЅС‘РЅРЅР°СЏ Р·Р°РґР°С‡Р°"
+// @Failure      400      {object}  core_http_response.ErrorResponse "Bad request"
+// @Failure      404      {object}  core_http_response.ErrorResponse "Task not found"
+// @Failure      409      {object}  core_http_response.ErrorResponse "Conflict"
+// @Failure      500      {object}  core_http_response.ErrorResponse "Internal server error"
+// @Router       /tasks/{id} [patch]
+func (h *TasksHTTPHandler) PatchTask(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	taskID, err := core_http_request.GetUUIDPathValue(r, "id")
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get taskID path value",
+		)
+
+		return
+	}
+
+	var request PatchTaskRequest
+	if err := core_http_request.DecodeAndValidateRequest(r, &request); err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to decode and validate HTTP request",
+		)
+
+		return
+	}
+
+	taskPatch := taskPatchFromRequest(request)
+
+	taskDomain, err := h.tasksService.PatchTask(ctx, taskID, taskPatch)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to patch task",
+		)
+
+		return
+	}
+
+	response := PatchUserResponse(taskDTOFromDomain(taskDomain))
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+func taskPatchFromRequest(request PatchTaskRequest) domain.TaskPatch {
+	return domain.NewTaskPatch(
+		request.Title.ToDomain(),
+		request.Description.ToDomain(),
+		request.Completed.ToDomain(),
+	)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\tasks\transport\http\transport.go ===
+// Package tasks_transport_http СЃРѕРґРµСЂР¶РёС‚ HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРєРё РґР»СЏ С„РёС‡Рё Р·Р°РґР°С‡.
+// РљР°Р¶РґС‹Р№ РѕР±СЂР°Р±РѕС‚С‡РёРє: С‡РёС‚Р°РµС‚ Р·Р°РїСЂРѕСЃ в†’ РІС‹Р·С‹РІР°РµС‚ СЃРµСЂРІРёСЃ в†’ С„РѕСЂРјРёСЂСѓРµС‚ РѕС‚РІРµС‚.
+// РўСЂР°РЅСЃРїРѕСЂС‚РЅС‹Р№ СЃР»РѕР№ РЅРµ СЃРѕРґРµСЂР¶РёС‚ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєРё вЂ” С‚РѕР»СЊРєРѕ РїСЂРµРѕР±СЂР°Р·РѕРІР°РЅРёРµ РґР°РЅРЅС‹С….
+package tasks_transport_http
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_http_server "github.com/cunofou/golang_todoapp/internal/core/transport/http/server"
+	"github.com/google/uuid"
+)
+
+// TasksHTTPHandler вЂ” HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРє РґР»СЏ РѕРїРµСЂР°С†РёР№ СЃ Р·Р°РґР°С‡Р°РјРё.
+type TasksHTTPHandler struct {
+	tasksService TasksService
+}
+
+// TasksService вЂ” РёРЅС‚РµСЂС„РµР№СЃ СЃРµСЂРІРёСЃР° Р·Р°РґР°С‡, РєРѕС‚РѕСЂС‹Р№ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ СЂРµР°Р»РёР·РѕРІР°РЅ
+// РґР»СЏ СЂР°Р±РѕС‚С‹ РѕР±СЂР°Р±РѕС‚С‡РёРєР°. РћРїСЂРµРґРµР»С‘РЅ Р·РґРµСЃСЊ РїРѕ РїСЂРёРЅС†РёРїСѓ DIP:
+// С‚СЂР°РЅСЃРїРѕСЂС‚РЅС‹Р№ СЃР»РѕР№ РІР»Р°РґРµРµС‚ РєРѕРЅС‚СЂР°РєС‚РѕРј Р·Р°РІРёСЃРёРјРѕСЃС‚Рё.
+type TasksService interface {
+	CreateTask(
+		ctx context.Context,
+		title string,
+		description *string,
+		authorUserID uuid.UUID,
+	) (domain.Task, error)
+
+	GetTasks(
+		ctx context.Context,
+		userID *uuid.UUID,
+		limit *int,
+		offset *int,
+	) ([]domain.Task, error)
+
+	GetTask(
+		ctx context.Context,
+		id uuid.UUID,
+	) (domain.Task, error)
+
+	DeleteTask(
+		ctx context.Context,
+		id uuid.UUID,
+	) error
+
+	PatchTask(
+		ctx context.Context,
+		id uuid.UUID,
+		patch domain.TaskPatch,
+	) (domain.Task, error)
+}
+
+// NewTasksHTTPHandler СЃРѕР·РґР°С‘С‚ РѕР±СЂР°Р±РѕС‚С‡РёРє Р·Р°РґР°С‡ СЃ РІРЅРµРґСЂС‘РЅРЅС‹Рј СЃРµСЂРІРёСЃРѕРј.
+func NewTasksHTTPHandler(
+	tasksService TasksService,
+) *TasksHTTPHandler {
+	return &TasksHTTPHandler{
+		tasksService: tasksService,
+	}
+}
+
+// Routes РІРѕР·РІСЂР°С‰Р°РµС‚ РјР°СЂС€СЂСѓС‚С‹ REST API РґР»СЏ Р·Р°РґР°С‡.
+// Р’С‹Р·С‹РІР°РµС‚СЃСЏ РІ main.go РїСЂРё СЂРµРіРёСЃС‚СЂР°С†РёРё РјР°СЂС€СЂСѓС‚РѕРІ РІ APIVersionRouter.
+func (h *TasksHTTPHandler) Routes() []core_http_server.Route {
+	return []core_http_server.Route{
+		{
+			Method:  http.MethodPost,
+			Path:    "/tasks",
+			Handler: h.CreateTask,
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/tasks",
+			Handler: h.GetTasks,
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/tasks/{id}",
+			Handler: h.GetTask,
+		},
+		{
+			Method:  http.MethodDelete,
+			Path:    "/tasks/{id}",
+			Handler: h.DeleteTask,
+		},
+		{
+			Method:  http.MethodPatch,
+			Path:    "/tasks/{id}",
+			Handler: h.PatchTask,
+		},
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\delete_user.go ===
+package users_postgres_repository
+
+import (
+	"context"
+	"fmt"
+
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	"github.com/google/uuid"
+)
+
+// DeleteUser СѓРґР°Р»СЏРµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ ID.
+// Р•СЃР»Рё RowsAffected() == 0 вЂ” РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ СЃСѓС‰РµСЃС‚РІРѕРІР°Р» в†’ ErrNotFound.
+func (r *UsersRepository) DeleteUser(
+	ctx context.Context,
+	id uuid.UUID,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	DELETE FROM todoapp.users
+	WHERE id=$1;
+	`
+
+	cmdTag, err := r.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("exec query: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return fmt.Errorf("user with id='%s': %w", id, core_errors.ErrNotFound)
+	}
+
+	return nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\get_user.go ===
+package users_postgres_repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+	"github.com/google/uuid"
+)
+
+// GetUser РІРѕР·РІСЂР°С‰Р°РµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ ID.
+// ErrNoRows С‚СЂР°РЅСЃР»РёСЂСѓРµС‚СЃСЏ РІ ErrNotFound в†’ HTTP 404.
+func (r *UsersRepository) GetUser(
+	ctx context.Context,
+	id uuid.UUID,
+) (domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	SELECT id, version, full_name, phone_number
+	FROM todoapp.users
+	WHERE id=$1;
+	`
+
+	row := r.pool.QueryRow(ctx, query, id)
+
+	var userModel UserModel
+	if err := userModel.Scan(row); err != nil {
+		if errors.Is(err, core_postgres_pool.ErrNoRows) {
+			return domain.User{}, fmt.Errorf(
+				"user with id='%s': %w",
+				id,
+				core_errors.ErrNotFound,
+			)
+		}
+
+		return domain.User{}, fmt.Errorf("scan error: %w", err)
+	}
+
+	userDomain := modelToDomain(userModel)
+
+	return userDomain, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\get_users.go ===
+package users_postgres_repository
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+)
+
+// GetUsers РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РїРѕРґРґРµСЂР¶РєРѕР№ РїР°РіРёРЅР°С†РёРё.
+// nil РІ limit/offset РїРµСЂРµРґР°С‘С‚СЃСЏ РІ PostgreSQL РєР°Рє NULL, С‡С‚Рѕ СЌРєРІРёРІР°Р»РµРЅС‚РЅРѕ РѕС‚СЃСѓС‚СЃС‚РІРёСЋ РѕРіСЂР°РЅРёС‡РµРЅРёР№.
+func (r *UsersRepository) GetUsers(
+	ctx context.Context,
+	limit *int,
+	offset *int,
+) ([]domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	SELECT id, version, full_name, phone_number
+	FROM todoapp.users
+	ORDER BY id ASC
+	LIMIT $1
+	OFFSET $2;
+	`
+
+	rows, err := r.pool.Query(
+		ctx,
+		query,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("select users: %w", err)
+	}
+	defer rows.Close()
+
+	var userModels []UserModel
+	for rows.Next() {
+		var userModel UserModel
+		if err := userModel.Scan(rows); err != nil {
+			return nil, fmt.Errorf("scan users: %w", err)
+		}
+
+		userModels = append(userModels, userModel)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("next rows: %w", err)
+	}
+
+	userDomains := modelsToDomains(userModels)
+
+	return userDomains, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\models.go ===
+package users_postgres_repository
+
+import (
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+	"github.com/google/uuid"
+)
+
+// UserModel вЂ” СЃС‚СЂСѓРєС‚СѓСЂР° РґР»СЏ РјР°РїРїРёРЅРіР° СЃС‚СЂРѕРєРё С‚Р°Р±Р»РёС†С‹ `todoapp.users` РІ Go-С‚РёРї.
+// РџРѕСЂСЏРґРѕРє РїРѕР»РµР№ СЃРѕРІРїР°РґР°РµС‚ СЃ РїРѕСЂСЏРґРєРѕРј СЃС‚РѕР»Р±С†РѕРІ РІ SELECT-Р·Р°РїСЂРѕСЃР°С… СЂРµРїРѕР·РёС‚РѕСЂРёСЏ.
+type UserModel struct {
+	ID          uuid.UUID
+	Version     int
+	FullName    string
+	PhoneNumber *string
+}
+
+// Scan Р·Р°РїРѕР»РЅСЏРµС‚ РїРѕР»СЏ РјРѕРґРµР»Рё РёР· СЂРµР·СѓР»СЊС‚Р°С‚Р° Р·Р°РїСЂРѕСЃР° Рє Р‘Р”.
+func (m *UserModel) Scan(row core_postgres_pool.Row) error {
+	return row.Scan(
+		&m.ID,
+		&m.Version,
+		&m.FullName,
+		&m.PhoneNumber,
+	)
+}
+
+// modelToDomain РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ РјРѕРґРµР»СЊ Р‘Р” РІ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚.
+func modelToDomain(model UserModel) domain.User {
+	return domain.NewUser(
+		model.ID,
+		model.Version,
+		model.FullName,
+		model.PhoneNumber,
+	)
+}
+
+// modelsToDomains РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ СЃРїРёСЃРѕРє РјРѕРґРµР»РµР№ Р‘Р” РІ СЃРїРёСЃРѕРє РґРѕРјРµРЅРЅС‹С… РѕР±СЉРµРєС‚РѕРІ.
+func modelsToDomains(models []UserModel) []domain.User {
+	domains := make([]domain.User, len(models))
+
+	for i, model := range models {
+		domains[i] = modelToDomain(model)
+	}
+
+	return domains
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\repository.go ===
+// Package users_postgres_repository СЂРµР°Р»РёР·СѓРµС‚ РґРѕСЃС‚СѓРї Рє РґР°РЅРЅС‹Рј РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ РІ PostgreSQL.
+package users_postgres_repository
+
+import (
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+)
+
+// UsersRepository вЂ” СЂРµР°Р»РёР·Р°С†РёСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ РЅР° Р±Р°Р·Рµ PostgreSQL.
+type UsersRepository struct {
+	pool core_postgres_pool.Pool
+}
+
+// NewUsersRepository СЃРѕР·РґР°С‘С‚ СЂРµРїРѕР·РёС‚РѕСЂРёР№ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РїРµСЂРµРґР°РЅРЅС‹Рј РїСѓР»РѕРј СЃРѕРµРґРёРЅРµРЅРёР№.
+func NewUsersRepository(
+	pool core_postgres_pool.Pool,
+) *UsersRepository {
+	return &UsersRepository{
+		pool: pool,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\save_user.go ===
+package users_postgres_repository
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+)
+
+// SaveUser РІСЃС‚Р°РІР»СЏРµС‚ РЅРѕРІРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ Р‘Р” Рё РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРѕС…СЂР°РЅС‘РЅРЅСѓСЋ РІРµСЂСЃРёСЋ.
+// RETURNING РїРѕР·РІРѕР»СЏРµС‚ РїРѕР»СѓС‡РёС‚СЊ РёС‚РѕРіРѕРІРѕРµ СЃРѕСЃС‚РѕСЏРЅРёРµ Р·Р°РїРёСЃРё РѕРґРЅРёРј Р·Р°РїСЂРѕСЃРѕРј.
+func (r *UsersRepository) SaveUser(
+	ctx context.Context,
+	user domain.User,
+) (domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	INSERT INTO todoapp.users (id, version, full_name, phone_number)
+	VALUES ($1, $2, $3, $4)
+	RETURNING id, version, full_name, phone_number;
+	`
+
+	row := r.pool.QueryRow(
+		ctx,
+		query,
+		user.ID,
+		user.Version,
+		user.FullName,
+		user.PhoneNumber,
+	)
+
+	var userModel UserModel
+	if err := userModel.Scan(row); err != nil {
+		return domain.User{}, fmt.Errorf("scan error: %w", err)
+	}
+
+	userDomain := modelToDomain(userModel)
+
+	return userDomain, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\repository\postgres\update_user.go ===
+package users_postgres_repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+	core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
+)
+
+// UpdateUser РѕР±РЅРѕРІР»СЏРµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ Р‘Р” СЃ РѕРїС‚РёРјРёСЃС‚РёС‡РЅРѕР№ Р±Р»РѕРєРёСЂРѕРІРєРѕР№.
+// WHERE id=$3 AND version=$4 вЂ” СѓСЃР»РѕРІРёРµ РіР°СЂР°РЅС‚РёСЂСѓРµС‚, С‡С‚Рѕ Р·Р°РїРёСЃСЊ РЅРµ Р±С‹Р»Р°
+// РїР°СЂР°Р»Р»РµР»СЊРЅРѕ РёР·РјРµРЅРµРЅР°. Р•СЃР»Рё version РЅРµ СЃРѕРІРїР°РґР°РµС‚ вЂ” РІРѕР·РІСЂР°С‰Р°РµРј ErrConflict.
+func (r *UsersRepository) UpdateUser(
+	ctx context.Context,
+	user domain.User,
+) (domain.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `
+	UPDATE todoapp.users
+	SET
+		full_name=$1,
+		phone_number=$2,
+		version=version+1
+	WHERE id=$3 AND version=$4
+	RETURNING
+		id,
+		version,
+		full_name,
+		phone_number;
+	`
+
+	row := r.pool.QueryRow(
+		ctx,
+		query,
+		user.FullName,
+		user.PhoneNumber,
+		user.ID,
+		user.Version,
+	)
+
+	var userModel UserModel
+	err := row.Scan(
+		&userModel.ID,
+		&userModel.Version,
+		&userModel.FullName,
+		&userModel.PhoneNumber,
+	)
+	if err != nil {
+		if errors.Is(err, core_postgres_pool.ErrNoRows) {
+			return domain.User{}, fmt.Errorf(
+				"user with id='%s' concurrently accessed: %w",
+				user.ID,
+				core_errors.ErrConflict,
+			)
+		}
+
+		return domain.User{}, fmt.Errorf("scan error: %w", err)
+	}
+
+	userDomain := modelToDomain(userModel)
+
+	return userDomain, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\service\create_user.go ===
+package users_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+)
+
+// CreateUser СЃРѕР·РґР°С‘С‚ РЅРѕРІРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ: С„РѕСЂРјРёСЂСѓРµС‚ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚,
+// РІР°Р»РёРґРёСЂСѓРµС‚ РµРіРѕ РёРЅРІР°СЂРёР°РЅС‚С‹ Рё СЃРѕС…СЂР°РЅСЏРµС‚ С‡РµСЂРµР· СЂРµРїРѕР·РёС‚РѕСЂРёР№.
+func (s *UsersService) CreateUser(
+	ctx context.Context,
+	fullName string,
+	phoneNumber *string,
+) (domain.User, error) {
+	user := domain.CreateUser(
+		fullName,
+		phoneNumber,
+	)
+
+	if err := user.Validate(); err != nil {
+		return domain.User{}, fmt.Errorf("validate user domain: %w", err)
+	}
+
+	user, err := s.usersRepository.SaveUser(ctx, user)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("save user in repository: %w", err)
+	}
+
+	return user, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\service\delete_user.go ===
+package users_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/google/uuid"
+)
+
+// DeleteUser СѓРґР°Р»СЏРµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ ID, РґРµР»РµРіРёСЂСѓСЏ Р·Р°РїСЂРѕСЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЋ.
+func (s *UsersService) DeleteUser(
+	ctx context.Context,
+	id uuid.UUID,
+) error {
+	if err := s.usersRepository.DeleteUser(ctx, id); err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+
+	return nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\service\get_user.go ===
+package users_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// GetUser РІРѕР·РІСЂР°С‰Р°РµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ ID, РґРµР»РµРіРёСЂСѓСЏ Р·Р°РїСЂРѕСЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЋ.
+func (s *UsersService) GetUser(
+	ctx context.Context,
+	id uuid.UUID,
+) (domain.User, error) {
+	user, err := s.usersRepository.GetUser(ctx, id)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("get user from repository: %w", err)
+	}
+
+	return user, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\service\get_users.go ===
+package users_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+)
+
+// GetUsers РІРѕР·РІСЂР°С‰Р°РµС‚ СЃРїРёСЃРѕРє РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РїР°РіРёРЅР°С†РёРµР№.
+// Р’Р°Р»РёРґРёСЂСѓРµС‚ limit Рё offset вЂ” РѕР±Р° РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ РЅРµРѕС‚СЂРёС†Р°С‚РµР»СЊРЅС‹РјРё.
+func (s *UsersService) GetUsers(
+	ctx context.Context,
+	limit *int,
+	offset *int,
+) ([]domain.User, error) {
+	if limit != nil && *limit < 0 {
+		return nil, fmt.Errorf(
+			"limit must be non-negative: %w",
+			core_errors.ErrInvalidArgument,
+		)
+	}
+
+	if offset != nil && *offset < 0 {
+		return nil, fmt.Errorf(
+			"offset must be non-negative: %w",
+			core_errors.ErrInvalidArgument,
+		)
+	}
+
+	users, err := s.usersRepository.GetUsers(
+		ctx,
+		limit,
+		offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get users from repository: %w", err)
+	}
+
+	return users, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\service\patch_user.go ===
+package users_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// PatchUser С‡Р°СЃС‚РёС‡РЅРѕ РѕР±РЅРѕРІР»СЏРµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ ID.
+// РџР°С‚С‚РµСЂРЅ В«read-modify-writeВ»: С‡РёС‚Р°РµРј в†’ РїСЂРёРјРµРЅСЏРµРј РїР°С‚С‡ в†’ СЃРѕС…СЂР°РЅСЏРµРј.
+// РћРїС‚РёРјРёСЃС‚РёС‡РЅР°СЏ Р±Р»РѕРєРёСЂРѕРІРєР° РЅР° СѓСЂРѕРІРЅРµ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ Р·Р°С‰РёС‰Р°РµС‚ РѕС‚ РєРѕРЅРєСѓСЂРµРЅС‚РЅС‹С… РёР·РјРµРЅРµРЅРёР№.
+func (s *UsersService) PatchUser(
+	ctx context.Context,
+	id uuid.UUID,
+	patch domain.UserPatch,
+) (domain.User, error) {
+	user, err := s.usersRepository.GetUser(ctx, id)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("get user from repository: %w", err)
+	}
+
+	if err := user.ApplyPatch(patch); err != nil {
+		return domain.User{}, fmt.Errorf("apply user patch: %w", err)
+	}
+
+	patchedUser, err := s.usersRepository.UpdateUser(ctx, user)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("update user in repository: %w", err)
+	}
+
+	return patchedUser, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\service\service.go ===
+// Package users_service СЃРѕРґРµСЂР¶РёС‚ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєСѓ СѓРїСЂР°РІР»РµРЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏРјРё.
+package users_service
+
+import (
+	"context"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// UsersService вЂ” СЃРµСЂРІРёСЃ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ Р±РёР·РЅРµСЃ-Р»РѕРіРёРєРѕР№ CRUD-РѕРїРµСЂР°С†РёР№.
+type UsersService struct {
+	usersRepository UsersRepository
+}
+
+// UsersRepository вЂ” РёРЅС‚РµСЂС„РµР№СЃ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№.
+// РћРїСЂРµРґРµР»С‘РЅ РІ РїР°РєРµС‚Рµ СЃРµСЂРІРёСЃР° РїРѕ РїСЂРёРЅС†РёРїСѓ Dependency Inversion.
+type UsersRepository interface {
+	SaveUser(
+		ctx context.Context,
+		user domain.User,
+	) (domain.User, error)
+
+	GetUsers(
+		ctx context.Context,
+		limit *int,
+		offset *int,
+	) ([]domain.User, error)
+
+	GetUser(
+		ctx context.Context,
+		id uuid.UUID,
+	) (domain.User, error)
+
+	DeleteUser(
+		ctx context.Context,
+		id uuid.UUID,
+	) error
+
+	UpdateUser(
+		ctx context.Context,
+		user domain.User,
+	) (domain.User, error)
+}
+
+// NewUsersService СЃРѕР·РґР°С‘С‚ СЃРµСЂРІРёСЃ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РІРЅРµРґСЂС‘РЅРЅС‹Рј СЂРµРїРѕР·РёС‚РѕСЂРёРµРј.
+func NewUsersService(
+	usersRepository UsersRepository,
+) *UsersService {
+	return &UsersService{
+		usersRepository: usersRepository,
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\create_user.go ===
+package users_transport_http
+
+import (
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+)
+
+type CreateUserRequest struct {
+	FullName    string  `json:"full_name"    validate:"required,min=3,max=100"               example:"Ivan Ivanov"`
+	PhoneNumber *string `json:"phone_number" validate:"omitempty,min=10,max=15,startswith=+" example:"+79998887766"`
+}
+
+type CreateUserResponse UserDTOResponse
+
+// CreateUser   godoc
+// @Summary     РЎРѕР·РґР°С‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+// @Description РЎРѕР·РґР°С‚СЊ РЅРѕРІРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ СЃРёСЃС‚РµРјРµ
+// @Tags        users
+// @Accept      json
+// @Produce     json
+// @Param       request body     CreateUserRequest  true "CreateUser С‚РµР»Рѕ Р·Р°РїСЂРѕСЃР°"
+// @Success     201     {object} CreateUserResponse "РЈСЃРїРµС€РЅРѕ СЃРѕР·РґР°РЅРЅС‹Р№ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ"
+// @Failure     400     {object} core_http_response.ErrorResponse "Bad request"
+// @Failure     500     {object} core_http_response.ErrorResponse "Internal server error"
+// @Router      /users [post]
+func (h *UsersHTTPHandler) CreateUser(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	var request CreateUserRequest
+	if err := core_http_request.DecodeAndValidateRequest(r, &request); err != nil {
+		responseHandler.ErrorResponse(err, "failed to decode and validate HTTP request")
+
+		return
+	}
+
+	userDomain, err := h.usersService.CreateUser(
+		ctx,
+		request.FullName,
+		request.PhoneNumber,
+	)
+	if err != nil {
+		responseHandler.ErrorResponse(err, "failed to create user")
+
+		return
+	}
+
+	response := CreateUserResponse(userDTOFromDomain(userDomain))
+
+	responseHandler.JSONResponse(response, http.StatusCreated)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\delete_user.go ===
+package users_transport_http
+
+import (
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+)
+
+// DeleteUser    godoc
+// @Summary      РЈРґР°Р»РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+// @Description  РЈРґР°Р»РµРЅРёРµ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµРіРѕ РІ СЃРёСЃС‚РµРјРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ РµРіРѕ ID
+// @Tags         users
+// @Param        id  path string true                          "ID СѓРґР°Р»СЏРµРјРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ" Format(uuid)
+// @Success      204                                           "РЈСЃРїРµС€РЅРѕРµ СѓРґР°Р»РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ"
+// @Failure      400 {object} core_http_response.ErrorResponse "Bad request"
+// @Failure      404 {object} core_http_response.ErrorResponse "User not found"
+// @Failure      500 {object} core_http_response.ErrorResponse "Internal server error"
+// @Router       /users/{id} [delete]
+func (h *UsersHTTPHandler) DeleteUser(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	userID, err := core_http_request.GetUUIDPathValue(r, "id")
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get userID path value",
+		)
+
+		return
+	}
+
+	if err := h.usersService.DeleteUser(ctx, userID); err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to delete user",
+		)
+
+		return
+	}
+
+	responseHandler.NoContentResponse()
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\dto_common.go ===
+package users_transport_http
+
+import (
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	"github.com/google/uuid"
+)
+
+// UserDTOResponse вЂ” DTO РґР»СЏ РїСЂРµРґСЃС‚Р°РІР»РµРЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ API-РѕС‚РІРµС‚Рµ.
+type UserDTOResponse struct {
+	ID          uuid.UUID `json:"id"           example:"550e8400-e29b-41d4-a716-446655440000"`
+	Version     int       `json:"version"      example:"3"`
+	FullName    string    `json:"full_name"    example:"Ivan Ivanov"`
+	PhoneNumber *string   `json:"phone_number" example:"+79998887766"`
+}
+
+// userDTOFromDomain РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ РґРѕРјРµРЅРЅС‹Р№ РѕР±СЉРµРєС‚ User РІ DTO РґР»СЏ HTTP-РѕС‚РІРµС‚Р°.
+func userDTOFromDomain(user domain.User) UserDTOResponse {
+	return UserDTOResponse{
+		ID:          user.ID,
+		Version:     user.Version,
+		FullName:    user.FullName,
+		PhoneNumber: user.PhoneNumber,
+	}
+}
+
+// usersDTOFromDomains РєРѕРЅРІРµСЂС‚РёСЂСѓРµС‚ СЃРїРёСЃРѕРє РґРѕРјРµРЅРЅС‹С… РѕР±СЉРµРєС‚РѕРІ РІ СЃРїРёСЃРѕРє DTO.
+func usersDTOFromDomains(users []domain.User) []UserDTOResponse {
+	usersDTO := make([]UserDTOResponse, len(users))
+
+	for i, user := range users {
+		usersDTO[i] = userDTOFromDomain(user)
+	}
+
+	return usersDTO
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\get_user.go ===
+package users_transport_http
+
+import (
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+)
+
+type GetUserResponse UserDTOResponse
+
+// GetUser       godoc
+// @Summary      РџРѕР»СѓС‡РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+// @Description  РџРѕР»СѓС‡РµРЅРёРµ РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ РµРіРѕ ID
+// @Tags         users
+// @Produce      json
+// @Param        id  path string true                          "ID РїРѕР»СѓС‡Р°РµРјРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ" Format(uuid)
+// @Success      200 {object} GetUserResponse                  "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ СѓСЃРїРµС€РЅРѕ РЅР°Р№РґРµРЅ"
+// @Failure      400 {object} core_http_response.ErrorResponse "Bad request"
+// @Failure      404 {object} core_http_response.ErrorResponse "User not found"
+// @Failure      500 {object} core_http_response.ErrorResponse "Internal server error"
+// @Router       /users/{id} [get]
+func (h *UsersHTTPHandler) GetUser(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	userID, err := core_http_request.GetUUIDPathValue(r, "id")
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get userID path value",
+		)
+
+		return
+	}
+
+	user, err := h.usersService.GetUser(ctx, userID)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get user",
+		)
+
+		return
+	}
+
+	response := GetUserResponse(userDTOFromDomain(user))
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\get_users.go ===
+package users_transport_http
+
+import (
+	"fmt"
+	"net/http"
+
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+)
+
+type GetUsersResponse []UserDTOResponse
+
+// GetUsers      godoc
+// @Summary      РЎРїРёСЃРѕРє РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№
+// @Description  РџСЂРѕСЃРјРѕС‚СЂ СЃРїРёСЃРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РѕРїС†РёРѕРЅР°Р»СЊРЅРѕР№ РїР°РіРёРЅР°С†РёРµР№
+// @Tags         users
+// @Produce      json
+// @Param        limit  query int false                        "Р Р°Р·РјРµСЂ СЃС‚СЂР°РЅРёС†С‹ СЃ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏРјРё"
+// @Param        offset query int false                        "РЎРјРµС‰РµРЅРёРµ СЃС‚СЂР°РЅРёС†С‹ СЃ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏРјРё"
+// @Success      200 {object} GetUsersResponse                 "РЈСЃРїРµС€РЅРѕРµ РїРѕР»СѓС‡РµРЅРёРµ СЃРїРёСЃРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№"
+// @Failure      400 {object} core_http_response.ErrorResponse "Bad request"
+// @Failure      500 {object} core_http_response.ErrorResponse "Internal server error"
+// @Router       /users [get]
+func (h *UsersHTTPHandler) GetUsers(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	limit, offset, err := getLimitOffsetQueryParams(r)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get 'limit'/'offset' query param",
+		)
+
+		return
+	}
+
+	userDomains, err := h.usersService.GetUsers(ctx, limit, offset)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get users",
+		)
+
+		return
+	}
+
+	response := GetUsersResponse(usersDTOFromDomains(userDomains))
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+func getLimitOffsetQueryParams(r *http.Request) (*int, *int, error) {
+	const (
+		limitQueryParamKey  = "limit"
+		offsetQueryParamKey = "offset"
+	)
+
+	limit, err := core_http_request.GetIntQueryParam(r, limitQueryParamKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get 'limit' query param: %w", err)
+	}
+
+	offset, err := core_http_request.GetIntQueryParam(r, offsetQueryParamKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get 'offset' query param: %w", err)
+	}
+
+	return limit, offset, nil
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\patch_user.go ===
+package users_transport_http
+
+import (
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
+	core_http_request "github.com/cunofou/golang_todoapp/internal/core/transport/http/request"
+	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
+	core_http_types "github.com/cunofou/golang_todoapp/internal/core/transport/http/types"
+)
+
+type PatchUserRequest struct {
+	FullName    core_http_types.Nullable[string] `json:"full_name"    swaggertype:"string" example:"РњР°РєСЃРёРј РњР°РєСЃРёРјРѕРІРёС‡"`
+	PhoneNumber core_http_types.Nullable[string] `json:"phone_number" swaggertype:"string" example:"+71112223344"`
+}
+
+func (r *PatchUserRequest) Validate() error {
+	if r.FullName.Set {
+		if r.FullName.Value == nil {
+			return fmt.Errorf("`FullName` can't be NULL")
+		}
+
+		fullNameLen := len([]rune(*r.FullName.Value))
+		if fullNameLen < 3 || fullNameLen > 100 {
+			return fmt.Errorf("`FullName` must be between 3 and 100 symbols")
+		}
+	}
+
+	if r.PhoneNumber.Set {
+		if r.PhoneNumber.Value != nil {
+			phoneNumberLen := len([]rune(*r.PhoneNumber.Value))
+			if phoneNumberLen < 10 || phoneNumberLen > 15 {
+				return fmt.Errorf("`PhoneNumber` must be between 10 and 15 symbols")
+			}
+
+			if !strings.HasPrefix(*r.PhoneNumber.Value, "+") {
+				return fmt.Errorf("`PhoneNumber` must startswith '+' symbol")
+			}
+		}
+	}
+
+	return nil
+}
+
+type PatchUserResponse UserDTOResponse
+
+// PatchUser     godoc
+// @Summary      РР·РјРµРЅРµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+// @Description  РР·РјРµРЅРµРЅРёРµ РёРЅС„РѕСЂРјР°С†РёРё РѕР± СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµРј РІ СЃРёСЃС‚РµРјРµ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ
+// @Description  ### Р›РѕРіРёРєР° РѕР±РЅРѕРІР»РµРЅРёСЏ РїРѕР»РµР№ (Three-state logic):
+// @Description  1. **РџРѕР»Рµ РЅРµ РїРµСЂРµРґР°РЅРѕ**: `phone_number` РёРіРЅРѕСЂРёСЂСѓРµС‚СЃСЏ, Р·РЅР°С‡РµРЅРёРµ РІ Р‘Р” РЅРµ РјРµРЅСЏРµС‚СЃСЏ
+// @Description  2. **РЇРІРЅРѕ РїРµСЂРµРґР°РЅРѕ Р·РЅР°С‡РµРЅРёРµ**: `"phone_number": "+711122233344"` - СѓСЃС‚Р°РЅР°РІР»РёРІР°РµС‚ РЅРѕРІС‹Р№ РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР° РІ Р‘Р”
+// @Description  3. **РџРµСЂРµРґР°РЅ null**: `"phone_number": null` - РѕС‡РёС‰Р°РµС‚ РїРѕР»Рµ РІ Р‘Р” (set to NULL)
+// @Description  РћРіСЂР°РЅРёС‡РµРЅРёСЏ: `full_name` РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ РІС‹СЃС‚Р°РІР»РµРЅ РєР°Рє null
+// @Tags         users
+// @Accept       json
+// @Produce      json
+// @Param        id      path string           true            "ID РёР·РјРµРЅСЏРµРјРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ" Format(uuid)
+// @Param        request body PatchUserRequest true            "PatchUser С‚РµР»Рѕ Р·Р°РїСЂРѕСЃР°"
+// @Success      200 {object} PatchUserResponse                "РЈСЃРїРµС€РЅРѕ РёР·РјРµРЅС‘РЅРЅС‹Р№ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ"
+// @Failure      400 {object} core_http_response.ErrorResponse "Bad request"
+// @Failure      404 {object} core_http_response.ErrorResponse "User not found"
+// @Failure      409 {object} core_http_response.ErrorResponse "Conflict"
+// @Failure      500 {object} core_http_response.ErrorResponse "Internal server error"
+// @Router       /users/{id} [patch]
+func (h *UsersHTTPHandler) PatchUser(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := core_logger.FromContext(ctx)
+	responseHandler := core_http_response.NewHTTPResponseHandler(log, rw)
+
+	userID, err := core_http_request.GetUUIDPathValue(r, "id")
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to get userID path value",
+		)
+
+		return
+	}
+
+	var request PatchUserRequest
+	if err := core_http_request.DecodeAndValidateRequest(r, &request); err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to decode and validate HTTP request",
+		)
+
+		return
+	}
+
+	userPatch := userPatchFromRequest(request)
+
+	userDomain, err := h.usersService.PatchUser(ctx, userID, userPatch)
+	if err != nil {
+		responseHandler.ErrorResponse(
+			err,
+			"failed to patch user",
+		)
+
+		return
+	}
+
+	response := PatchUserResponse(userDTOFromDomain(userDomain))
+
+	responseHandler.JSONResponse(response, http.StatusOK)
+}
+
+func userPatchFromRequest(request PatchUserRequest) domain.UserPatch {
+	return domain.NewUserPatch(
+		request.FullName.ToDomain(),
+		request.PhoneNumber.ToDomain(),
+	)
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\users\transport\http\transport.go ===
+// Package users_transport_http СЃРѕРґРµСЂР¶РёС‚ HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРєРё РґР»СЏ С„РёС‡Рё РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№.
+package users_transport_http
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
+	core_http_server "github.com/cunofou/golang_todoapp/internal/core/transport/http/server"
+	"github.com/google/uuid"
+)
+
+// UsersHTTPHandler вЂ” HTTP-РѕР±СЂР°Р±РѕС‚С‡РёРє РґР»СЏ РѕРїРµСЂР°С†РёР№ СЃ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏРјРё.
+type UsersHTTPHandler struct {
+	usersService UsersService
+}
+
+// UsersService вЂ” РёРЅС‚РµСЂС„РµР№СЃ СЃРµСЂРІРёСЃР° РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№.
+// РћРїСЂРµРґРµР»С‘РЅ РІ С‚СЂР°РЅСЃРїРѕСЂС‚РЅРѕРј СЃР»РѕРµ РїРѕ РїСЂРёРЅС†РёРїСѓ Dependency Inversion.
+type UsersService interface {
+	CreateUser(
+		ctx context.Context,
+		fullName string,
+		phoneNumber *string,
+	) (domain.User, error)
+
+	GetUsers(
+		ctx context.Context,
+		limit *int,
+		offset *int,
+	) ([]domain.User, error)
+
+	GetUser(
+		ctx context.Context,
+		id uuid.UUID,
+	) (domain.User, error)
+
+	DeleteUser(
+		ctx context.Context,
+		id uuid.UUID,
+	) error
+
+	PatchUser(
+		ctx context.Context,
+		id uuid.UUID,
+		patch domain.UserPatch,
+	) (domain.User, error)
+}
+
+// NewUsersHTTPHandler СЃРѕР·РґР°С‘С‚ РѕР±СЂР°Р±РѕС‚С‡РёРє РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ СЃ РІРЅРµРґСЂС‘РЅРЅС‹Рј СЃРµСЂРІРёСЃРѕРј.
+func NewUsersHTTPHandler(
+	usersService UsersService,
+) *UsersHTTPHandler {
+	return &UsersHTTPHandler{
+		usersService: usersService,
+	}
+}
+
+// Routes РІРѕР·РІСЂР°С‰Р°РµС‚ РјР°СЂС€СЂСѓС‚С‹ REST API РґР»СЏ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№.
+func (h *UsersHTTPHandler) Routes() []core_http_server.Route {
+	return []core_http_server.Route{
+		{
+			Method:  http.MethodPost,
+			Path:    "/users",
+			Handler: h.CreateUser,
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/users",
+			Handler: h.GetUsers,
+			/*
+				Example of usage Middleware on separate Route
+
+				Middleware: []core_http_middleware.Middleware{
+					core_http_middleware.Dummy("get users middleware"),
+				},
+			*/
+		},
+		{
+			Method:  http.MethodGet,
+			Path:    "/users/{id}",
+			Handler: h.GetUser,
+		},
+		{
+			Method:  http.MethodDelete,
+			Path:    "/users/{id}",
+			Handler: h.DeleteUser,
+		},
+		{
+			Method:  http.MethodPatch,
+			Path:    "/users/{id}",
+			Handler: h.PatchUser,
+		},
+	}
+}
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\web\repository\file_system\file_system.go ===
+package file_system
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\web\service\service.go ===
+package service
+
+
+
+=== C:\Users\mrfle\Todo_app\golang-todoapp\internal\features\web\transport\http\http.go ===
+package http
+

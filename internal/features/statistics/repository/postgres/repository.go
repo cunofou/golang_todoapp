@@ -1,9 +1,9 @@
-// Package statistics_postgres_repository реализует доступ к данным для расчёта статистики.
+// package postgres реализует доступ к данным для расчёта статистики.
 // Репозиторий читает задачи с опциональной фильтрацией — доменная логика подсчёта
 // статистики находится в domain.CreateStatistics, не здесь.
-package statistics_postgres_repository
+package postgres
 
-import core_postgres_pool "github.com/cunofou/golang-todoapp/internal/core/repository/postgres/pool"
+import core_postgres_pool "github.com/cunofou/golang_todoapp/internal/core/repository/postgres/pool"
 
 // StatisticsRepository — репозиторий для получения данных, необходимых для статистики.
 type StatisticsRepository struct {

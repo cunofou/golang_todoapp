@@ -1,4 +1,4 @@
-package statistics_postgres_repository
+package postgres
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cunofou/golang-todoapp/internal/core/domain"
+	"github.com/cunofou/golang_todoapp/internal/core/domain"
 	"github.com/google/uuid"
 )
 

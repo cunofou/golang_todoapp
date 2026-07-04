@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	core_errors "github.com/cunofou/golang-todoapp/internal/core/errors"
+	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
 	"github.com/google/uuid"
 )
 

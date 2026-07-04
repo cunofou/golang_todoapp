@@ -1,61 +1,42 @@
-package core_http_request
+package request
 
 import (
-	"fmt"
-	"net/http"
-	"strconv"
+    "fmt"
+    "net/http"
+    "strconv"
 
-	core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
-	"github.com/google/uuid"
+    core_errors "github.com/cunofou/golang_todoapp/internal/core/errors"
+    "github.com/google/uuid"
 )
 
-// GetUUIDPathValue извлекает переменную пути (path variable) по ключу key
-// и парсит её как UUID. Пример: для маршрута /tasks/{id} ключ — "id".
 func GetUUIDPathValue(r *http.Request, key string) (uuid.UUID, error) {
-	pathValue := r.PathValue(key)
-	if pathValue == "" {
-		return uuid.UUID{}, fmt.Errorf(
-			"no key='%s' in path values: %w",
-			key,
-			core_errors.ErrInvalidArgument,
-		)
-	}
+    value := GetPathValue(r, key)
+    if value == "" {
+        return uuid.Nil, fmt.Errorf("path parameter %s is empty: %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	val, err := uuid.Parse(pathValue)
-	if err != nil {
-		return uuid.UUID{}, fmt.Errorf(
-			"path value='%s' by key='%s' not a valid uuid: %v: %w",
-			pathValue,
-			key,
-			err,
-			core_errors.ErrInvalidArgument,
-		)
-	}
+    id, err := uuid.Parse(value)
+    if err != nil {
+        return uuid.Nil, fmt.Errorf("invalid UUID format for %s: %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	return val, nil
+    return id, nil
 }
 
-// GetIntPathValue извлекает переменную пути по ключу key и парсит её как int.
 func GetIntPathValue(r *http.Request, key string) (int, error) {
-	pathValue := r.PathValue(key)
-	if pathValue == "" {
-		return 0, fmt.Errorf(
-			"no key='%s' in path values: %w",
-			key,
-			core_errors.ErrInvalidArgument,
-		)
-	}
+    value := GetPathValue(r, key)
+    if value == "" {
+        return 0, fmt.Errorf("path parameter %s is empty: %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	val, err := strconv.Atoi(pathValue)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"path value='%s' by key='%s' not a valid integer: %v: %w",
-			pathValue,
-			key,
-			err,
-			core_errors.ErrInvalidArgument,
-		)
-	}
+    num, err := strconv.Atoi(value)
+    if err != nil {
+        return 0, fmt.Errorf("invalid integer format for %s: %w", key, core_errors.ErrInvalidArgument)
+    }
 
-	return val, nil
+    return num, nil
+}
+
+func GetPathValue(r *http.Request, key string) string {
+    return ""
 }

@@ -3,7 +3,7 @@ package core_http_server
 import (
 	"net/http"
 
-	core_http_middleware "github.com/cunoofou/golang-todoapp/internal/core/transport/http/middleware"
+	core_http_middleware "github.com/cunofou/golang_todoapp/internal/core/transport/http/middleware"
 )
 
 // APIVersion — тип для идентификатора версии API.
