@@ -3,6 +3,7 @@ package core_http_middleware
 import (
 	"context"
 	"net/http"
+	"time"
 
 	core_logger "github.com/cunofou/golang_todoapp/internal/core/logger"
 	core_http_response "github.com/cunofou/golang_todoapp/internal/core/transport/http/response"
@@ -35,7 +36,6 @@ func Logger(log *core_logger.Logger) Middleware {
 			)
 			ctx := context.WithValue(r.Context(), "log", l)
 			next.ServeHTTP(w, r.WithContext(ctx))
-
 		})
 	}
 }
@@ -45,6 +45,10 @@ func Panic() Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 			log := core_logger.FromContext(ctx)
+			if log == nil {
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				return
+			}
 			responseHandler := core_http_response.NewHTTPResponseHandler(log, w)
 			defer func() {
 				if p := recover(); p != nil {
@@ -54,26 +58,33 @@ func Panic() Middleware {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
 
-	func Trace() Middleware {
-    return func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            ctx := r.Context()
-            log := core_logger.FromContext(ctx)
-            rw := core_http_response.NewHTTPResponseWriter(w)
+func Trace() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			log := core_logger.FromContext(ctx)
+			if log == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rw := core_http_response.NewHTTPResponseWriter(w)
 
-            before := time.Now()
-            log.Debug(
-                ">>> incoming HTTP request",
-                zap.Time("time", before), // или before.UTC()
-            )
-            next.ServeHTTP(rw, r)
+			before := time.Now()
+			log.Debug(
+				">>> incoming HTTP request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Time("time", before),
+			)
+			next.ServeHTTP(rw, r)
 
-            log.Debug(
-                "<<< done HTTP response",
-                zap.Int("status-code", rw.GetStatusCodeOrPanic()),
-                zap.Duration("latency", time.Since(before)),
-            )
-        })
-    }
+			log.Debug(
+				"<<< done HTTP response",
+				zap.Int("status-code", rw.GetStatusCodeOrPanic()),
+				zap.Duration("latency", time.Since(before)),
+			)
+		})
+	}
 }

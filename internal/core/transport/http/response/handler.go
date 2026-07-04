@@ -30,7 +30,8 @@ func (h *HTTPResponseHandler) PanicResponse(p any, msg string) {
 		"message": msg,
 		"error":   err.Error(),
 	}
-	if err := json.NewDecoder(h.rw).Encode(response); err != nil {
+	h.rw.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(h.rw).Encode(response); err != nil {
 		h.log.Error("write HTTP response error", zap.Error(err))
 	}
 }
